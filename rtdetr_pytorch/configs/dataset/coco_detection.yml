@@ -1,14 +1,14 @@
 task: detection
 
-num_classes: 80
-remap_mscoco_category: True
+num_classes: 6
+remap_mscoco_category: False
 
 train_dataloader: 
   type: DataLoader
   dataset: 
     type: CocoDetection
-    img_folder: ./dataset/coco/train2017/
-    ann_file: ./dataset/coco/annotations/instances_train2017.json
+    img_folder: rtdetr_pytorch/src/data/vofo/dataset/train/images/
+    ann_file: rtdetr_pytorch/src/data/vofo/annotation_semantic_seg.json
     transforms:
       type: Compose
       ops: ~
@@ -22,8 +22,8 @@ val_dataloader:
   type: DataLoader
   dataset: 
     type: CocoDetection
-    img_folder: ./dataset/coco/val2017/
-    ann_file: ./dataset/coco/annotations/instances_val2017.json
+    img_folder: rtdetr_pytorch/src/data/vofo/dataset/val/images/
+    ann_file: rtdetr_pytorch/src/data/vofo/annotation_semantic_seg.json
     transforms:
       type: Compose
       ops: ~ 
