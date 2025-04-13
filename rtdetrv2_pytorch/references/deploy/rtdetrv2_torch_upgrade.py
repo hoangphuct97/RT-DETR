@@ -35,6 +35,10 @@ CATEGORY_NAMES = {
     6: 'R_Arytenoid cartilage',
 }
 
+LEFT_VOCAL_FOLD = 1
+LEFT_ARYTENOID_CARTILAGE = 2
+RIGHT_VOCAL_FOLD = 5
+RIGHT_ARYTENOID_CARTILAGE = 6
 
 def hex_to_rgba(hex_color, alpha=0.1):
     """Convert hex color to RGBA tuple with transparency"""
