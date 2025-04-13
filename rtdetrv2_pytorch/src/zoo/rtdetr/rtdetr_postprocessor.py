@@ -79,8 +79,8 @@ class RTDETRPostProcessor(nn.Module):
             right_vocal_fold_mask = (labels == self.RIGHT_VOCAL_FOLD) & (scores > VOCAL_FOLD_THRESHOLD)
 
             # Find existing arytenoid detections
-            left_arytenoid_mask = (labels == self.LEFT_ARYTENOID) & (scores > EXISTING_ARYTENOID_THRESHOLD)
-            right_arytenoid_mask = (labels == self.RIGHT_ARYTENOID) & (scores > EXISTING_ARYTENOID_THRESHOLD)
+            left_arytenoid_mask = (labels == self.LEFT_ARYTENOID_CARTILAGE) & (scores > EXISTING_ARYTENOID_THRESHOLD)
+            right_arytenoid_mask = (labels == self.RIGHT_ARYTENOID_CARTILAGE) & (scores > EXISTING_ARYTENOID_THRESHOLD)
 
             # Extract relevant detections
             left_vocal_fold_boxes = boxes[left_vocal_fold_mask] if torch.any(left_vocal_fold_mask) else torch.tensor([], device=boxes.device)
@@ -122,7 +122,7 @@ class RTDETRPostProcessor(nn.Module):
 
                     # Add new detection
                     new_boxes.append([ary_x1, ary_y1, ary_x2, ary_y2])
-                    new_labels.append(self.LEFT_ARYTENOID)
+                    new_labels.append(self.LEFT_ARYTENOID_CARTILAGE)
                     new_scores.append(ADDED_ARYTENOID_SCORE)
 
             # Handle right vocal fold and right arytenoid similarly
@@ -153,7 +153,7 @@ class RTDETRPostProcessor(nn.Module):
 
                     # Add new detection
                     new_boxes.append([ary_x1, ary_y1, ary_x2, ary_y2])
-                    new_labels.append(self.RIGHT_ARYTENOID)
+                    new_labels.append(self.RIGHT_ARYTENOID_CARTILAGE)
                     new_scores.append(ADDED_ARYTENOID_SCORE)
 
             # Append new detections if any were added
