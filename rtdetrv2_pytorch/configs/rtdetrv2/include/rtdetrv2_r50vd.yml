@@ -77,8 +77,6 @@ RTDETRCriterionv2:
   alpha: 0.75
   gamma: 2.0
   spatial_loss_weight: 1.0
-  vocal_class_idx: 0
-  arytenoid_class_idx: 2
 
   matcher:
     type: HungarianMatcher

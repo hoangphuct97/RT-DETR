@@ -278,7 +278,8 @@ class RTDETRCriterionv2(nn.Module):
 
     def loss_spatial(self, outputs, targets, indices, num_boxes):
         """Spatial relationship loss between vocal folds and arytenoids"""
-        total_loss = 0
+        device = outputs['pred_boxes'].device
+        total_loss = torch.tensor(0.0, device=device)
 
         for batch_idx, (src_ids, tgt_ids) in enumerate(indices):
             pred_boxes = outputs['pred_boxes'][batch_idx]
@@ -303,27 +304,28 @@ class RTDETRCriterionv2(nn.Module):
                     right_arytenoid.append(pred_box)
 
             # Calculate spatial relationships
-            batch_loss = 0.0
+            batch_loss = torch.tensor(0.0, device=device)
+            penalty = torch.tensor(1.0, device=device)  # Tensor penalty
 
             # Process left vocal folds
             for lv_box in left_vocal:
-                if len(left_arytenoid) > 0:
-                    la_box = left_arytenoid[0]  # Assume one-to-one correspondence
+                if left_arytenoid:
+                    la_box = left_arytenoid[0]
                     y_loss = F.l1_loss(la_box[[1]], lv_box[[3]] + 0.1)
                     x_loss = F.l1_loss(la_box[[0, 2]], lv_box[[0, 2]])
                     batch_loss += (y_loss + x_loss) / 2
                 else:
-                    batch_loss += 1.0  # Missing left arytenoid penalty
+                    batch_loss += penalty
 
             # Process right vocal folds
             for rv_box in right_vocal:
-                if len(right_arytenoid) > 0:
+                if right_arytenoid:
                     ra_box = right_arytenoid[0]
                     y_loss = F.l1_loss(ra_box[[1]], rv_box[[3]] + 0.1)
                     x_loss = F.l1_loss(ra_box[[0, 2]], rv_box[[0, 2]])
                     batch_loss += (y_loss + x_loss) / 2
                 else:
-                    batch_loss += 1.0  # Missing right arytenoid penalty
+                    batch_loss += penalty
 
             total_loss += batch_loss
 
