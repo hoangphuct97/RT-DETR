@@ -1,14 +1,14 @@
 """Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 """
+import sys
 
-import torch 
-import torch.nn as nn 
-import torch.nn.functional as F 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 import torchvision
 
 from ...core import register
-
 
 __all__ = ['RTDETRPostProcessor']
 
@@ -21,30 +21,30 @@ def mod(a, b):
 @register()
 class RTDETRPostProcessor(nn.Module):
     __share__ = [
-        'num_classes', 
-        'use_focal_loss', 
-        'num_top_queries', 
+        'num_classes',
+        'use_focal_loss',
+        'num_top_queries',
         'remap_mscoco_category'
     ]
-    
+
     def __init__(
-        self, 
-        num_classes=80, 
-        use_focal_loss=True, 
-        num_top_queries=300, 
-        remap_mscoco_category=False
+            self,
+            num_classes=80,
+            use_focal_loss=True,
+            num_top_queries=300,
+            remap_mscoco_category=False
     ) -> None:
         super().__init__()
         self.use_focal_loss = use_focal_loss
         self.num_top_queries = num_top_queries
         self.num_classes = int(num_classes)
-        self.remap_mscoco_category = remap_mscoco_category 
+        self.remap_mscoco_category = remap_mscoco_category
         self.deploy_mode = False
 
-        self.LEFT_VOCAL_FOLD = 1
-        self.LEFT_ARYTENOID_CARTILAGE = 2
-        self.RIGHT_VOCAL_FOLD = 5
-        self.RIGHT_ARYTENOID_CARTILAGE = 6
+        self.LEFT_VOCAL_FOLD = 0
+        self.LEFT_ARYTENOID_CARTILAGE = 1
+        self.RIGHT_VOCAL_FOLD = 4
+        self.RIGHT_ARYTENOID_CARTILAGE = 5
 
     def extra_repr(self) -> str:
         return f'use_focal_loss={self.use_focal_loss}, num_classes={self.num_classes}, num_top_queries={self.num_top_queries}'
@@ -62,9 +62,9 @@ class RTDETRPostProcessor(nn.Module):
             Enhanced detection results with added arytenoid cartilages
         """
         # Confidence thresholds
-        VOCAL_FOLD_THRESHOLD = 0.5
-        EXISTING_ARYTENOID_THRESHOLD = 0.3  # Lower threshold to check for existing detections
-        ADDED_ARYTENOID_SCORE = 0.4  # Confidence score for added arytenoid predictions
+        VOCAL_FOLD_THRESHOLD = 0.7
+        EXISTING_ARYTENOID_THRESHOLD = 0.7  # Lower threshold to check for existing detections
+        ADDED_ARYTENOID_SCORE = 0.7  # Confidence score for added arytenoid predictions
 
         enhanced_results = []
 
@@ -83,11 +83,15 @@ class RTDETRPostProcessor(nn.Module):
             right_arytenoid_mask = (labels == self.RIGHT_ARYTENOID_CARTILAGE) & (scores > EXISTING_ARYTENOID_THRESHOLD)
 
             # Extract relevant detections
-            left_vocal_fold_boxes = boxes[left_vocal_fold_mask] if torch.any(left_vocal_fold_mask) else torch.tensor([], device=boxes.device)
-            left_arytenoid_boxes = boxes[left_arytenoid_mask] if torch.any(left_arytenoid_mask) else torch.tensor([], device=boxes.device)
+            left_vocal_fold_boxes = boxes[left_vocal_fold_mask] if torch.any(left_vocal_fold_mask) else torch.tensor([],
+                                                                                                                     device=boxes.device)
+            left_arytenoid_boxes = boxes[left_arytenoid_mask] if torch.any(left_arytenoid_mask) else torch.tensor([],
+                                                                                                                  device=boxes.device)
 
-            right_vocal_fold_boxes = boxes[right_vocal_fold_mask] if torch.any(right_vocal_fold_mask) else torch.tensor([], device=boxes.device)
-            right_arytenoid_boxes = boxes[right_arytenoid_mask] if torch.any(right_arytenoid_mask) else torch.tensor([], device=boxes.device)
+            right_vocal_fold_boxes = boxes[right_vocal_fold_mask] if torch.any(right_vocal_fold_mask) else torch.tensor(
+                [], device=boxes.device)
+            right_arytenoid_boxes = boxes[right_arytenoid_mask] if torch.any(right_arytenoid_mask) else torch.tensor([],
+                                                                                                                     device=boxes.device)
 
             # Lists to store new detections
             new_boxes = []
@@ -115,10 +119,10 @@ class RTDETRPostProcessor(nn.Module):
                     height = y2 - y1
 
                     # Predict where arytenoid should be based on the vocal fold position
-                    ary_x1 = x1 + width * 0.1  # Slight adjustment based on anatomy
-                    ary_x2 = x2 - width * 0.1
-                    ary_y1 = y2 + 5  # Just below the vocal fold
-                    ary_y2 = y2 + height * 0.8  # Estimated height based on vocal fold
+                    ary_x1 = x1 - 50 + width * 0.1  # Slight adjustment based on anatomy
+                    ary_x2 = x2 - width * 0.9
+                    ary_y1 = y2 - 30  # Just below the vocal fold
+                    ary_y2 = y2 + height * 0.2  # Estimated height based on vocal fold
 
                     # Add new detection
                     new_boxes.append([ary_x1, ary_y1, ary_x2, ary_y2])
@@ -146,10 +150,10 @@ class RTDETRPostProcessor(nn.Module):
                     height = y2 - y1
 
                     # Predict where arytenoid should be based on the vocal fold position
-                    ary_x1 = x1 + width * 0.1  # Slight adjustment based on anatomy
-                    ary_x2 = x2 - width * 0.1
-                    ary_y1 = y2 + 5  # Just below the vocal fold
-                    ary_y2 = y2 + height * 0.8  # Estimated height based on vocal fold
+                    ary_x1 = x1 + 40 + width * 0.1  # Slight adjustment based on anatomy
+                    ary_x2 = x2 + 50 - width * 0.1
+                    ary_y1 = y2 - 30  # Just below the vocal fold
+                    ary_y2 = y2 + height * 0.1  # Estimated height based on vocal fold
 
                     # Add new detection
                     new_boxes.append([ary_x1, ary_y1, ary_x2, ary_y2])
@@ -171,7 +175,7 @@ class RTDETRPostProcessor(nn.Module):
             enhanced_results.append(result)
 
         return enhanced_results
-    
+
     # def forward(self, outputs, orig_target_sizes):
     def forward(self, outputs, orig_target_sizes: torch.Tensor):
         logits, boxes = outputs['pred_logits'], outputs['pred_boxes']
@@ -188,7 +192,7 @@ class RTDETRPostProcessor(nn.Module):
             labels = mod(index, self.num_classes)
             index = index // self.num_classes
             boxes = bbox_pred.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, bbox_pred.shape[-1]))
-            
+
         else:
             scores = F.softmax(logits)[:, :, :-1]
             scores, labels = scores.max(dim=-1)
@@ -196,28 +200,33 @@ class RTDETRPostProcessor(nn.Module):
                 scores, index = torch.topk(scores, self.num_top_queries, dim=-1)
                 labels = torch.gather(labels, dim=1, index=index)
                 boxes = torch.gather(boxes, dim=1, index=index.unsqueeze(-1).tile(1, 1, boxes.shape[-1]))
-        
-        # TODO for onnx export
-        if self.deploy_mode:
-            return labels, boxes, scores
-
-        # TODO
-        if self.remap_mscoco_category:
-            from ...data.dataset import mscoco_label2category
-            labels = torch.tensor([mscoco_label2category[int(x.item())] for x in labels.flatten()])\
-                .to(boxes.device).reshape(labels.shape)
 
         results = []
         for lab, box, sco in zip(labels, boxes, scores):
             result = dict(labels=lab, boxes=box, scores=sco)
             results.append(result)
 
-        # Apply our anatomical post-processing
-        enhanced_results = self.anatomical_postprocessing(results)
-        return enhanced_results
-        
+        # Apply anatomical post-processing before deploy mode check
+        results = self.anatomical_postprocessing(results)
+            
+        # TODO for onnx export
+        if self.deploy_mode:
+            updated_labels = torch.stack([r['labels'] for r in results])
+            updated_boxes = torch.stack([r['boxes'] for r in results])
+            updated_scores = torch.stack([r['scores'] for r in results])
+            return updated_labels, updated_boxes, updated_scores
+
+        # TODO
+        if self.remap_mscoco_category:
+            from ...data.dataset import mscoco_label2category
+            for i, result in enumerate(results):
+                labels = result['labels']
+                results[i]['labels'] = torch.tensor([mscoco_label2category[int(x.item())] for x in labels.flatten()]) \
+                    .to(labels.device).reshape(labels.shape)
+
+        return results
 
     def deploy(self, ):
         self.eval()
         self.deploy_mode = True
-        return self 
+        return self

@@ -1,10 +1,10 @@
 """Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 """
 
-import torch 
-import torch.nn as nn 
+import torch
+import torch.nn as nn
 import torch.distributed
-import torch.nn.functional as F 
+import torch.nn.functional as F
 import torchvision
 
 import copy
@@ -24,15 +24,18 @@ class RTDETRCriterionv2(nn.Module):
     __share__ = ['num_classes', ]
     __inject__ = ['matcher', ]
 
-    def __init__(self, \
-        matcher, 
-        weight_dict, 
-        losses, 
-        alpha=0.2, 
-        gamma=2.0, 
-        num_classes=80, 
-        boxes_weight_format=None,
-        share_matched_indices=False):
+    def __init__(self,
+                 matcher,
+                 weight_dict,
+                 losses,
+                 alpha=0.2,
+                 gamma=2.0,
+                 num_classes=6,
+                 boxes_weight_format=None,
+                 share_matched_indices=False,
+                 spatial_loss_weight=1.0,
+                 left_vocal_class_idx=0, left_arytenoid_class_idx=1,
+                 right_vocal_class_idx=4, right_arytenoid_class_idx=5):
         """Create the criterion.
         Parameters:
             matcher: module able to compute a matching between targets and proposals
@@ -46,11 +49,19 @@ class RTDETRCriterionv2(nn.Module):
         self.num_classes = num_classes
         self.matcher = matcher
         self.weight_dict = weight_dict
-        self.losses = losses 
+        self.losses = losses
         self.boxes_weight_format = boxes_weight_format
         self.share_matched_indices = share_matched_indices
         self.alpha = alpha
         self.gamma = gamma
+        self.spatial_loss_weight = spatial_loss_weight
+        self.left_vocal_class_idx = left_vocal_class_idx
+        self.right_vocal_class_idx = right_vocal_class_idx
+        self.left_arytenoid_class_idx = left_arytenoid_class_idx
+        self.right_arytenoid_class_idx = right_arytenoid_class_idx
+
+        # Add spatial loss to weight dict
+        self.weight_dict['loss_spatial'] = spatial_loss_weight
 
     def loss_labels_focal(self, outputs, targets, indices, num_boxes):
         assert 'pred_logits' in outputs
@@ -60,7 +71,7 @@ class RTDETRCriterionv2(nn.Module):
         target_classes = torch.full(src_logits.shape[:2], self.num_classes,
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
-        target = F.one_hot(target_classes, num_classes=self.num_classes+1)[..., :-1]
+        target = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]
         loss = torchvision.ops.sigmoid_focal_loss(src_logits, target, self.alpha, self.gamma, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
 
@@ -90,7 +101,7 @@ class RTDETRCriterionv2(nn.Module):
 
         pred_score = F.sigmoid(src_logits).detach()
         weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
-        
+
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         return {'loss_vfl': loss}
@@ -109,7 +120,7 @@ class RTDETRCriterionv2(nn.Module):
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
 
-        loss_giou = 1 - torch.diag(generalized_box_iou(\
+        loss_giou = 1 - torch.diag(generalized_box_iou(
             box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(target_boxes)))
         loss_giou = loss_giou if boxes_weight is None else loss_giou * boxes_weight
         losses['loss_giou'] = loss_giou.sum() / num_boxes
@@ -132,6 +143,7 @@ class RTDETRCriterionv2(nn.Module):
             'boxes': self.loss_boxes,
             'focal': self.loss_labels_focal,
             'vfl': self.loss_labels_vfl,
+            'spatial': self.loss_spatial,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -151,7 +163,7 @@ class RTDETRCriterionv2(nn.Module):
         if is_dist_available_and_initialized():
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
-        
+
         # Retrieve the matching between the outputs of the last layer and the targets
         matched = self.matcher(outputs_without_aux, targets)
         indices = matched['indices']
@@ -159,7 +171,7 @@ class RTDETRCriterionv2(nn.Module):
         # Compute all the requested losses
         losses = {}
         for loss in self.losses:
-            meta = self.get_loss_meta_info(loss, outputs, targets, indices)            
+            meta = self.get_loss_meta_info(loss, outputs, targets, indices)
             l_dict = self.get_loss(loss, outputs, targets, indices, num_boxes, **meta)
             l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
             losses.update(l_dict)
@@ -212,7 +224,7 @@ class RTDETRCriterionv2(nn.Module):
                     l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
                     l_dict = {k + f'_enc_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
-            
+
             if class_agnostic:
                 self.num_classes = orig_num_classes
 
@@ -229,14 +241,14 @@ class RTDETRCriterionv2(nn.Module):
             iou, _ = box_iou(box_cxcywh_to_xyxy(src_boxes.detach()), box_cxcywh_to_xyxy(target_boxes))
             iou = torch.diag(iou)
         elif self.boxes_weight_format == 'giou':
-            iou = torch.diag(generalized_box_iou(\
+            iou = torch.diag(generalized_box_iou(
                 box_cxcywh_to_xyxy(src_boxes.detach()), box_cxcywh_to_xyxy(target_boxes)))
         else:
             raise AttributeError()
 
-        if loss in ('boxes', ):
+        if loss in ('boxes',):
             meta = {'boxes_weight': iou}
-        elif loss in ('vfl', ):
+        elif loss in ('vfl',):
             meta = {'values': iou}
         else:
             meta = {}
@@ -250,7 +262,7 @@ class RTDETRCriterionv2(nn.Module):
         dn_positive_idx, dn_num_group = dn_meta["dn_positive_idx"], dn_meta["dn_num_group"]
         num_gts = [len(t['labels']) for t in targets]
         device = targets[0]['labels'].device
-        
+
         dn_match_indices = []
         for i, num_gt in enumerate(num_gts):
             if num_gt > 0:
@@ -259,7 +271,60 @@ class RTDETRCriterionv2(nn.Module):
                 assert len(dn_positive_idx[i]) == len(gt_idx)
                 dn_match_indices.append((dn_positive_idx[i], gt_idx))
             else:
-                dn_match_indices.append((torch.zeros(0, dtype=torch.int64, device=device), \
-                    torch.zeros(0, dtype=torch.int64,  device=device)))
-        
+                dn_match_indices.append((torch.zeros(0, dtype=torch.int64, device=device),
+                                         torch.zeros(0, dtype=torch.int64, device=device)))
+
         return dn_match_indices
+
+    def loss_spatial(self, outputs, targets, indices, num_boxes):
+        """Spatial relationship loss between vocal folds and arytenoids"""
+        total_loss = 0
+
+        for batch_idx, (src_ids, tgt_ids) in enumerate(indices):
+            pred_boxes = outputs['pred_boxes'][batch_idx]
+
+            # Track matched instances by class
+            left_vocal = []
+            right_vocal = []
+            left_arytenoid = []
+            right_arytenoid = []
+
+            for src, tgt in zip(src_ids, tgt_ids):
+                label = targets[batch_idx]['labels'][tgt].item()
+                pred_box = pred_boxes[src]
+
+                if label == self.left_vocal_class_idx:
+                    left_vocal.append(pred_box)
+                elif label == self.right_vocal_class_idx:
+                    right_vocal.append(pred_box)
+                elif label == self.left_arytenoid_class_idx:
+                    left_arytenoid.append(pred_box)
+                elif label == self.right_arytenoid_class_idx:
+                    right_arytenoid.append(pred_box)
+
+            # Calculate spatial relationships
+            batch_loss = 0.0
+
+            # Process left vocal folds
+            for lv_box in left_vocal:
+                if len(left_arytenoid) > 0:
+                    la_box = left_arytenoid[0]  # Assume one-to-one correspondence
+                    y_loss = F.l1_loss(la_box[[1]], lv_box[[3]] + 0.1)
+                    x_loss = F.l1_loss(la_box[[0, 2]], lv_box[[0, 2]])
+                    batch_loss += (y_loss + x_loss) / 2
+                else:
+                    batch_loss += 1.0  # Missing left arytenoid penalty
+
+            # Process right vocal folds
+            for rv_box in right_vocal:
+                if len(right_arytenoid) > 0:
+                    ra_box = right_arytenoid[0]
+                    y_loss = F.l1_loss(ra_box[[1]], rv_box[[3]] + 0.1)
+                    x_loss = F.l1_loss(ra_box[[0, 2]], rv_box[[0, 2]])
+                    batch_loss += (y_loss + x_loss) / 2
+                else:
+                    batch_loss += 1.0  # Missing right arytenoid penalty
+
+            total_loss += batch_loss
+
+        return {'loss_spatial': total_loss / num_boxes}

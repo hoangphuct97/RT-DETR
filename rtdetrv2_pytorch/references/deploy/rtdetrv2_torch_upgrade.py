@@ -1,5 +1,6 @@
 """Enhanced visualization for detection model with CocoDetection ground truth support
 """
+import time
 
 import torch
 import torch.nn as nn
@@ -40,6 +41,7 @@ LEFT_ARYTENOID_CARTILAGE = 2
 RIGHT_VOCAL_FOLD = 5
 RIGHT_ARYTENOID_CARTILAGE = 6
 
+
 def hex_to_rgba(hex_color, alpha=0.1):
     """Convert hex color to RGBA tuple with transparency"""
     rgba = to_rgba(hex_color, alpha)
@@ -74,7 +76,7 @@ def draw_boxes(image, labels, boxes, scores=None, is_gt=False, score_threshold=0
     # Filter by confidence score for predictions
     valid_indices = torch.arange(len(labels))
     if scores is not None and not is_gt:
-        valid_indices = torch.where(scores > score_threshold)[0]
+        valid_indices = torch.where(scores >= score_threshold)[0]
 
     # Draw each box
     for idx in valid_indices:
@@ -312,6 +314,7 @@ def main(args):
     )
 
     # Save results
+    # result_images = [ground_truth, prediction]
     # save_visualization(result_images, args.output_dir, os.path.basename(args.im_file).split('.')[0])
 
     return ground_truth, prediction
@@ -352,6 +355,8 @@ if __name__ == '__main__':
             ground_truths.append(ground_truth)
             predictions.append(prediction)
 
-        export_results(ground_truths, predictions, "results/output.pdf")
+        time_str = time.strftime("%Y%m%d_%H%M%S")
+        output_file_name = f"results/output_{time_str}.pdf"
+        export_results(ground_truths, predictions, output_file_name)
     else:
         main(args)
