@@ -277,18 +277,17 @@ class RTDETRCriterionv2(nn.Module):
         return dn_match_indices
 
     def loss_spatial(self, outputs, targets, indices, num_boxes):
-        """Spatial relationship loss between vocal folds and arytenoids"""
+        """Spatial loss with 3% overlap tolerance and strict positioning"""
         device = outputs['pred_boxes'].device
         total_loss = torch.tensor(0.0, device=device)
+        allowed_overlap = torch.tensor(0.05, device=device)  # 3% overlap tolerance
 
         for batch_idx, (src_ids, tgt_ids) in enumerate(indices):
             pred_boxes = outputs['pred_boxes'][batch_idx]
 
-            # Track matched instances by class
-            left_vocal = []
-            right_vocal = []
-            left_arytenoid = []
-            right_arytenoid = []
+            # Organize predictions by anatomical class
+            left_vocal, right_vocal = [], []
+            left_arytenoid, right_arytenoid = [], []
 
             for src, tgt in zip(src_ids, tgt_ids):
                 label = targets[batch_idx]['labels'][tgt].item()
@@ -303,29 +302,35 @@ class RTDETRCriterionv2(nn.Module):
                 elif label == self.right_arytenoid_class_idx:
                     right_arytenoid.append(pred_box)
 
-            # Calculate spatial relationships
             batch_loss = torch.tensor(0.0, device=device)
-            penalty = torch.tensor(1.0, device=device)  # Tensor penalty
+            penalty = torch.tensor(1.0, device=device)
 
-            # Process left vocal folds
-            for lv_box in left_vocal:
-                if left_arytenoid:
-                    la_box = left_arytenoid[0]
-                    y_loss = F.l1_loss(la_box[[1]], lv_box[[3]] + 0.1)
-                    x_loss = F.l1_loss(la_box[[0, 2]], lv_box[[0, 2]])
-                    batch_loss += (y_loss + x_loss) / 2
-                else:
-                    batch_loss += penalty
+            def calculate_pair_loss(vocal_boxes, arytenoid_boxes):
+                """Helper function for pair-wise loss calculation"""
+                pair_loss = torch.tensor(0.0, device=device)
 
-            # Process right vocal folds
-            for rv_box in right_vocal:
-                if right_arytenoid:
-                    ra_box = right_arytenoid[0]
-                    y_loss = F.l1_loss(ra_box[[1]], rv_box[[3]] + 0.1)
-                    x_loss = F.l1_loss(ra_box[[0, 2]], rv_box[[0, 2]])
-                    batch_loss += (y_loss + x_loss) / 2
-                else:
-                    batch_loss += penalty
+                for v_box in vocal_boxes:
+                    if arytenoid_boxes:
+                        a_box = arytenoid_boxes[0]
+
+                        # Vertical relationship with overlap tolerance
+                        overlap_limit = v_box[3] - allowed_overlap  # Max allowed upward position
+                        vertical_diff = overlap_limit - a_box[1]  # a_box[1] = arytenoid top-Y
+                        vertical_penalty = torch.clamp(vertical_diff, min=0)  # Only penalize if above limit
+
+                        # Horizontal alignment (same X coordinates)
+                        x_loss = F.l1_loss(a_box[[0, 2]], v_box[[0, 2]])
+
+                        # Combine losses
+                        pair_loss += (vertical_penalty + x_loss) / 2
+                    else:
+                        pair_loss += penalty  # Missing anatomy penalty
+
+                return pair_loss
+
+            # Calculate losses for both sides
+            batch_loss += calculate_pair_loss(left_vocal, left_arytenoid)
+            batch_loss += calculate_pair_loss(right_vocal, right_arytenoid)
 
             total_loss += batch_loss
 
