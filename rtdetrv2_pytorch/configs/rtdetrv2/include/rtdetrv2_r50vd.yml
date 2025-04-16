@@ -72,11 +72,11 @@ RTDETRPostProcessor:
 
 
 RTDETRCriterionv2:
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_spatial: 1}
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_spatial: 3}
   losses: ['vfl', 'boxes', 'spatial']
   alpha: 0.75
   gamma: 2.0
-  spatial_loss_weight: 1.0
+  spatial_loss_weight: 3.0
 
   matcher:
     type: HungarianMatcher
