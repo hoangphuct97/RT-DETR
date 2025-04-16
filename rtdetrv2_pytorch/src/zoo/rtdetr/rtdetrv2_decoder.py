@@ -88,7 +88,7 @@ class MSDeformableAttention(nn.Module):
                 p.requires_grad = False
 
     def apply_spatial_bias(self, attn_weights, reference_points, vocal_fold_boxes, class_ids):
-        bs, nq, _ = reference_points.shape
+        bs, nq, n_head, n_points = attn_weights.shape
 
         for b in range(bs):
             if vocal_fold_boxes[b] is None:
@@ -114,9 +114,10 @@ class MSDeformableAttention(nn.Module):
                     continue
 
                 # Get positions of arytenoid queries
-                query_points = reference_points[b, arytenoid_mask]
-                qx = query_points[..., 0]
-                qy = query_points[..., 1]
+                query_points = reference_points[b, :, 0, 0, :]
+                query_points = query_points[arytenoid_mask]
+                qx = query_points[:, 0]
+                qy = query_points[:, 1]
 
                 # Calculate vertical relationship (should be below vocal fold)
                 vertical_bias = torch.sigmoid((qy - vf_bottom_y) * 10)  # Positive when below
@@ -131,8 +132,11 @@ class MSDeformableAttention(nn.Module):
                 combined_bias = (self.vertical_bias_scale * vertical_bias *
                                  self.side_bias_scale * side_bias)
 
+                # Get the shape of the attention weights for the selected queries
+                bias_expanded = combined_bias.unsqueeze(-1).unsqueeze(-1).expand(-1, n_head, n_points)
+
                 # Apply to attention weights
-                attn_weights[b, arytenoid_mask] += combined_bias.unsqueeze(-1)
+                attn_weights[b, arytenoid_mask] += bias_expanded
 
         return attn_weights
 
@@ -193,11 +197,6 @@ class MSDeformableAttention(nn.Module):
         attention_weights = self.attention_weights(query).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
         attention_weights = F.softmax(attention_weights, dim=-1).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
 
-        if vocal_fold_boxes is not None and class_ids is not None:
-            attention_weights = self.apply_spatial_bias(attention_weights, reference_points, vocal_fold_boxes, class_ids)
-
-        attention_weights = F.softmax(attention_weights, dim=-1).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
-
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.tensor(value_spatial_shapes)
             offset_normalizer = offset_normalizer.flip([1]).reshape(1, 1, 1, self.num_levels, 1, 2)
@@ -212,6 +211,9 @@ class MSDeformableAttention(nn.Module):
             raise ValueError(
                 "Last dim of reference_points must be 2 or 4, but get {} instead.".
                 format(reference_points.shape[-1]))
+
+        if vocal_fold_boxes is not None and class_ids is not None:
+            attention_weights = self.apply_spatial_bias(attention_weights, sampling_locations, vocal_fold_boxes, class_ids)
 
         output = self.ms_deformable_attn_core(value, value_spatial_shapes, sampling_locations, attention_weights, self.num_points_list)
 
@@ -324,7 +326,9 @@ class TransformerDecoder(nn.Module):
 
         output = target
         # Track predicted class IDs through layers
-        class_ids = torch.argmax(score_head[0](output), dim=-1)
+        class_ids = torch.zeros(output.shape[1], dtype=torch.long, device=output.device)
+        if score_head[0](output).shape[-1] > 1:  # Only update if classes are predicted
+            class_ids = torch.argmax(score_head[0](output), dim=-1)
         
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)
@@ -690,6 +694,13 @@ class RTDETRTransformerv2(nn.Module):
 
         vocal_boxes = []
         for b in range(coords.shape[0]):
+            batch_mask = vocal_fold_mask[b]
+            if not batch_mask.any():
+                # Create dummy box with requires_grad=True
+                dummy_box = torch.zeros(1, 5, device=coords.device, requires_grad=True)
+                vocal_boxes.append(dummy_box)
+                continue
+            
             batch_coords = coords[b][vocal_fold_mask[b]]
             batch_classes = logits[b][vocal_fold_mask[b]].argmax(-1)
             vocal_boxes.append([
