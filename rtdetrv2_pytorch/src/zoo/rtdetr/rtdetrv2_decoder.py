@@ -75,13 +75,66 @@ class MSDeformableAttention(nn.Module):
         self.value_proj = nn.Linear(embed_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
 
-        self.ms_deformable_attn_core = functools.partial(deformable_attention_core_func_v2, method=self.method) 
+        self.ms_deformable_attn_core = functools.partial(deformable_attention_core_func_v2, method=self.method)
+
+        # Spatial bias parameters
+        self.vertical_bias_scale = nn.Parameter(torch.tensor(1.0))
+        self.side_bias_scale = nn.Parameter(torch.tensor(1.0))
 
         self._reset_parameters()
 
         if method == 'discrete':
             for p in self.sampling_offsets.parameters():
                 p.requires_grad = False
+
+    def apply_spatial_bias(self, attn_weights, reference_points, vocal_fold_boxes, class_ids):
+        bs, nq, _ = reference_points.shape
+
+        for b in range(bs):
+            if vocal_fold_boxes[b] is None:
+                continue
+
+            for vf_data in vocal_fold_boxes[b]:
+                vf_class, x1, y1, x2, y2 = vf_data
+                vf_side = 'left' if vf_class == 0 else 'right' if vf_class == 4 else None
+                if vf_side is None:
+                    continue
+
+                # Calculate vocal fold center and bottom
+                vf_center_x = (x1 + x2) / 2
+                vf_bottom_y = y2
+
+                # Get queries for corresponding arytenoid class
+                if vf_side == 'left':
+                    arytenoid_mask = (class_ids[b] == 1)
+                else:
+                    arytenoid_mask = (class_ids[b] == 5)
+
+                if not arytenoid_mask.any():
+                    continue
+
+                # Get positions of arytenoid queries
+                query_points = reference_points[b, arytenoid_mask]
+                qx = query_points[..., 0]
+                qy = query_points[..., 1]
+
+                # Calculate vertical relationship (should be below vocal fold)
+                vertical_bias = torch.sigmoid((qy - vf_bottom_y) * 10)  # Positive when below
+
+                # Calculate horizontal relationship (same side)
+                if vf_side == 'left':
+                    side_bias = torch.sigmoid((vf_center_x - qx) * 5)  # Prefer left side
+                else:
+                    side_bias = torch.sigmoid((qx - vf_center_x) * 5)  # Prefer right side
+
+                # Combine biases
+                combined_bias = (self.vertical_bias_scale * vertical_bias *
+                                 self.side_bias_scale * side_bias)
+
+                # Apply to attention weights
+                attn_weights[b, arytenoid_mask] += combined_bias.unsqueeze(-1)
+
+        return attn_weights
 
     def _reset_parameters(self):
         # sampling_offsets
@@ -110,7 +163,9 @@ class MSDeformableAttention(nn.Module):
                 reference_points: torch.Tensor,
                 value: torch.Tensor,
                 value_spatial_shapes: List[int],
-                value_mask: torch.Tensor=None):
+                value_mask: torch.Tensor=None,
+                vocal_fold_boxes=None, 
+                class_ids=None):
         """
         Args:
             query (Tensor): [bs, query_length, C]
@@ -136,6 +191,11 @@ class MSDeformableAttention(nn.Module):
         sampling_offsets = sampling_offsets.reshape(bs, Len_q, self.num_heads, sum(self.num_points_list), 2)
 
         attention_weights = self.attention_weights(query).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
+        attention_weights = F.softmax(attention_weights, dim=-1).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
+
+        if vocal_fold_boxes is not None and class_ids is not None:
+            attention_weights = self.apply_spatial_bias(attention_weights, reference_points, vocal_fold_boxes, class_ids)
+
         attention_weights = F.softmax(attention_weights, dim=-1).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
 
         if reference_points.shape[-1] == 2:
@@ -209,7 +269,9 @@ class TransformerDecoderLayer(nn.Module):
                 memory_spatial_shapes,
                 attn_mask=None,
                 memory_mask=None,
-                query_pos_embed=None):
+                query_pos_embed=None,
+                vocal_fold_boxes=None,
+                class_ids=None):
         # self attention
         q = k = self.with_pos_embed(target, query_pos_embed)
 
@@ -223,7 +285,9 @@ class TransformerDecoderLayer(nn.Module):
             reference_points, 
             memory, 
             memory_spatial_shapes, 
-            memory_mask)
+            memory_mask,
+            vocal_fold_boxes=vocal_fold_boxes,
+            class_ids=class_ids)
         target = target + self.dropout2(target2)
         target = self.norm2(target)
 
@@ -252,17 +316,26 @@ class TransformerDecoder(nn.Module):
                 score_head,
                 query_pos_head,
                 attn_mask=None,
-                memory_mask=None):
+                memory_mask=None,
+                vocal_fold_boxes=None):
         dec_out_bboxes = []
         dec_out_logits = []
         ref_points_detach = F.sigmoid(ref_points_unact)
 
         output = target
+        # Track predicted class IDs through layers
+        class_ids = torch.argmax(score_head[0](output), dim=-1)
+        
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)
             query_pos_embed = query_pos_head(ref_points_detach)
 
-            output = layer(output, ref_points_input, memory, memory_spatial_shapes, attn_mask, memory_mask, query_pos_embed)
+            output = layer(output, ref_points_input, memory, memory_spatial_shapes, attn_mask, memory_mask, query_pos_embed,
+                           vocal_fold_boxes=vocal_fold_boxes, class_ids=class_ids)
+
+            # Update class predictions
+            if i < self.num_layers - 1:
+                class_ids = torch.argmax(score_head[i+1](output), dim=-1)
 
             inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points_detach))
 
@@ -289,9 +362,9 @@ class RTDETRTransformerv2(nn.Module):
     __share__ = ['num_classes', 'eval_spatial_size']
 
     def __init__(self,
-                 num_classes=80,
+                 num_classes=6,
                  hidden_dim=256,
-                 num_queries=300,
+                 num_queries=6,
                  feat_channels=[512, 1024, 2048],
                  feat_strides=[8, 16, 32],
                  num_levels=3,
@@ -500,6 +573,7 @@ class RTDETRTransformerv2(nn.Module):
         output_memory :torch.Tensor = self.enc_output(memory)
         enc_outputs_logits :torch.Tensor = self.enc_score_head(output_memory)
         enc_outputs_coord_unact :torch.Tensor = self.enc_bbox_head(output_memory) + anchors
+        vocal_fold_boxes = self._extract_vocal_folds(enc_outputs_logits, enc_outputs_coord_unact)
 
         enc_topk_bboxes_list, enc_topk_logits_list = [], []
         enc_topk_memory, enc_topk_logits, enc_topk_bbox_unact = \
@@ -524,7 +598,7 @@ class RTDETRTransformerv2(nn.Module):
             enc_topk_bbox_unact = torch.concat([denoising_bbox_unact, enc_topk_bbox_unact], dim=1)
             content = torch.concat([denoising_logits, content], dim=1)
         
-        return content, enc_topk_bbox_unact, enc_topk_bboxes_list, enc_topk_logits_list
+        return content, enc_topk_bbox_unact, enc_topk_bboxes_list, enc_topk_logits_list, vocal_fold_boxes
 
     def _select_topk(self, memory: torch.Tensor, outputs_logits: torch.Tensor, outputs_coords_unact: torch.Tensor, topk: int):
         if self.query_select_method == 'default':
@@ -568,7 +642,7 @@ class RTDETRTransformerv2(nn.Module):
         else:
             denoising_logits, denoising_bbox_unact, attn_mask, dn_meta = None, None, None, None
 
-        init_ref_contents, init_ref_points_unact, enc_topk_bboxes_list, enc_topk_logits_list = \
+        init_ref_contents, init_ref_points_unact, enc_topk_bboxes_list, enc_topk_logits_list, vocal_fold_boxes = \
             self._get_decoder_input(memory, spatial_shapes, denoising_logits, denoising_bbox_unact)
 
         # decoder
@@ -580,7 +654,8 @@ class RTDETRTransformerv2(nn.Module):
             self.dec_bbox_head,
             self.dec_score_head,
             self.query_pos_head,
-            attn_mask=attn_mask)
+            attn_mask=attn_mask,
+            vocal_fold_boxes=vocal_fold_boxes)
 
         if self.training and dn_meta is not None:
             dn_out_bboxes, out_bboxes = torch.split(out_bboxes, dn_meta['dn_num_split'], dim=2)
@@ -607,3 +682,18 @@ class RTDETRTransformerv2(nn.Module):
         # as a dict having both a Tensor and a list.
         return [{'pred_logits': a, 'pred_boxes': b}
                 for a, b in zip(outputs_class, outputs_coord)]
+
+    def _extract_vocal_folds(self, logits, coords, threshold=0.7):
+        """Extract left (class 0) and right (class 4) vocal folds"""
+        probs = F.softmax(logits, dim=-1)
+        vocal_fold_mask = (probs[..., [0,4]] > threshold).any(-1)
+
+        vocal_boxes = []
+        for b in range(coords.shape[0]):
+            batch_coords = coords[b][vocal_fold_mask[b]]
+            batch_classes = logits[b][vocal_fold_mask[b]].argmax(-1)
+            vocal_boxes.append([
+                (int(cls.item()), *coord.sigmoid().tolist())
+                for cls, coord in zip(batch_classes, batch_coords)
+            ])
+        return vocal_boxes
