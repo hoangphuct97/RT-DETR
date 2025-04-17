@@ -257,30 +257,31 @@ class TransformerDecoder(nn.Module):
             'R_Arytenoid cartilage': 5
         }
 
-    def compute_spatial_bias(self, logits, bboxes, spatial_shapes, num_queries, alpha=1.0, delta=0.1):
+    def compute_spatial_bias(self, logits, bboxes, spatial_shapes, num_queries, num_heads, num_points_list, alpha=1.0, delta=0.1):
         """
         Compute spatial bias for cross-attention based on vocal fold predictions.
         
         Args:
-            logits: (bs, num_queries, num_classes)
-            bboxes: (bs, num_queries, 4), [x1, y1, x2, y2] in [0,1]
+            logits: (bs, num_queries, num_classes) or None
+            bboxes: (bs, num_queries, 4), [x1, y1, x2, y2] in [0,1] or None
             spatial_shapes: List of [H, W] for each feature level
             num_queries: int
+            num_heads: int
+            num_points_list: List of number of sampling points per level
             alpha: Bias magnitude
             delta: Margin for x-coordinate range
         
         Returns:
-            bias: (bs, num_queries, num_levels, total_points) or None
+            bias: (bs, num_queries, num_heads, total_points) or None
         """
         if logits is None or bboxes is None:
             return None
 
         bs = logits.size(0)
-        num_levels = len(spatial_shapes)
-        num_points_list = self.layers[0].cross_attn.num_points_list
         total_points = sum(num_points_list)
 
-        bias = torch.zeros(bs, num_queries, num_levels, total_points, device=logits.device)
+        # Initialize bias tensor: same bias applied to all heads
+        bias = torch.zeros(bs, num_queries, num_heads, total_points, device=logits.device)
 
         for side in ['L', 'R']:
             vocal_class = f'{side}_Vocal Fold'
@@ -297,6 +298,7 @@ class TransformerDecoder(nn.Module):
             for b in range(bs):
                 if max_prob[b] > 0.5:  # Confidence threshold
                     x1, y1, x2, y2 = vocal_boxes[b]
+                    point_idx = 0
                     for lvl, (H, W) in enumerate(spatial_shapes):
                         # Convert to feature map coordinates
                         x1_f, x2_f = x1 * W, x2 * W
@@ -310,12 +312,11 @@ class TransformerDecoder(nn.Module):
                             for x in range(int(x_min), int(x_max)):
                                 bias_map[y, x] = alpha
 
-                        # Map to sampling points
-                        point_idx = 0
-                        for num_points in num_points_list:
-                            for _ in range(num_points):
-                                bias[b, cartilage_mask[b], lvl, point_idx] = bias_map.flatten()
-                                point_idx += 1
+                        # Assign bias to sampling points for this level
+                        num_points = num_points_list[lvl]
+                        for _ in range(num_points):
+                            bias[b, cartilage_mask[b], :, point_idx] = bias_map.flatten()
+                            point_idx += 1
 
         return bias
 
@@ -339,7 +340,12 @@ class TransformerDecoder(nn.Module):
 
         for i, layer in enumerate(self.layers):
             # Compute spatial bias from previous layer's predictions
-            spatial_bias = self.compute_spatial_bias(prev_logits, prev_bboxes, memory_spatial_shapes, target.size(1))
+            num_heads = layer.cross_attn.num_heads
+            num_points_list = layer.cross_attn.num_points_list
+            spatial_bias = self.compute_spatial_bias(
+                prev_logits, prev_bboxes, memory_spatial_shapes,
+                target.size(1), num_heads, num_points_list
+            )
 
             ref_points_input = ref_points_detach.unsqueeze(2)
             query_pos_embed = query_pos_head(ref_points_detach)
