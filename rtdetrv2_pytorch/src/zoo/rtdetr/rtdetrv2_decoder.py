@@ -110,7 +110,8 @@ class MSDeformableAttention(nn.Module):
                 reference_points: torch.Tensor,
                 value: torch.Tensor,
                 value_spatial_shapes: List[int],
-                value_mask: torch.Tensor=None):
+                value_mask: torch.Tensor=None,
+                spatial_bias: torch.Tensor=None):
         """
         Args:
             query (Tensor): [bs, query_length, C]
@@ -136,6 +137,9 @@ class MSDeformableAttention(nn.Module):
         sampling_offsets = sampling_offsets.reshape(bs, Len_q, self.num_heads, sum(self.num_points_list), 2)
 
         attention_weights = self.attention_weights(query).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
+        if spatial_bias is not None:
+            # Add spatial bias to attention logits before softmax
+            attention_weights = attention_weights + spatial_bias
         attention_weights = F.softmax(attention_weights, dim=-1).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
 
         if reference_points.shape[-1] == 2:
@@ -209,21 +213,22 @@ class TransformerDecoderLayer(nn.Module):
                 memory_spatial_shapes,
                 attn_mask=None,
                 memory_mask=None,
-                query_pos_embed=None):
+                query_pos_embed=None,
+                spatial_bias=None):
         # self attention
         q = k = self.with_pos_embed(target, query_pos_embed)
-
         target2, _ = self.self_attn(q, k, value=target, attn_mask=attn_mask)
         target = target + self.dropout1(target2)
         target = self.norm1(target)
 
-        # cross attention
+        # cross attention with spatial bias
         target2 = self.cross_attn(\
             self.with_pos_embed(target, query_pos_embed), 
             reference_points, 
             memory, 
             memory_spatial_shapes, 
-            memory_mask)
+            memory_mask,
+            spatial_bias=spatial_bias)
         target = target + self.dropout2(target2)
         target = self.norm2(target)
 
@@ -236,12 +241,83 @@ class TransformerDecoderLayer(nn.Module):
 
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1):
+    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1, num_classes=6):
         super(TransformerDecoder, self).__init__()
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
+        self.num_classes = num_classes
+        self.class_to_idx = {
+            'L_Vocal Fold': 0,
+            'L_Arytenoid cartilage': 1,
+            'Benign lesion': 2,
+            'Malignant lesion': 3,
+            'R_Vocal Fold': 4,
+            'R_Arytenoid cartilage': 5
+        }
+
+    def compute_spatial_bias(self, logits, bboxes, spatial_shapes, num_queries, alpha=1.0, delta=0.1):
+        """
+        Compute spatial bias for cross-attention based on vocal fold predictions.
+        
+        Args:
+            logits: (bs, num_queries, num_classes)
+            bboxes: (bs, num_queries, 4), [x1, y1, x2, y2] in [0,1]
+            spatial_shapes: List of [H, W] for each feature level
+            num_queries: int
+            alpha: Bias magnitude
+            delta: Margin for x-coordinate range
+        
+        Returns:
+            bias: (bs, num_queries, num_levels, total_points) or None
+        """
+        if logits is None or bboxes is None:
+            return None
+
+        bs = logits.size(0)
+        num_levels = len(spatial_shapes)
+        num_points_list = self.layers[0].cross_attn.num_points_list
+        total_points = sum(num_points_list)
+
+        bias = torch.zeros(bs, num_queries, num_levels, total_points, device=logits.device)
+
+        for side in ['L', 'R']:
+            vocal_class = f'{side}_Vocal Fold'
+            cartilage_class = f'{side}_Arytenoid cartilage'
+
+            # Find vocal fold with max probability
+            vocal_probs = logits[:, :, self.class_to_idx[vocal_class]]
+            max_prob, vocal_idx = vocal_probs.max(dim=1)
+            vocal_boxes = bboxes[torch.arange(bs), vocal_idx]  # (bs, 4)
+
+            # Identify cartilage queries
+            cartilage_mask = logits.argmax(dim=-1) == self.class_to_idx[cartilage_class]
+
+            for b in range(bs):
+                if max_prob[b] > 0.5:  # Confidence threshold
+                    x1, y1, x2, y2 = vocal_boxes[b]
+                    for lvl, (H, W) in enumerate(spatial_shapes):
+                        # Convert to feature map coordinates
+                        x1_f, x2_f = x1 * W, x2 * W
+                        y2_f = y2 * H
+                        x_min, x_max = max(0, x1_f - delta * W), min(W, x2_f + delta * W)
+                        y_min = y2_f
+
+                        # Create bias map per level
+                        bias_map = torch.ones(H, W, device=bias.device) * (-alpha)
+                        for y in range(int(y_min), H):
+                            for x in range(int(x_min), int(x_max)):
+                                bias_map[y, x] = alpha
+
+                        # Map to sampling points
+                        point_idx = 0
+                        for num_points in num_points_list:
+                            for _ in range(num_points):
+                                bias[b, cartilage_mask[b], lvl, point_idx] = bias_map.flatten()
+                                point_idx += 1
+
+        return bias
 
     def forward(self,
                 target,
@@ -258,23 +334,41 @@ class TransformerDecoder(nn.Module):
         ref_points_detach = F.sigmoid(ref_points_unact)
 
         output = target
+        prev_logits = None
+        prev_bboxes = None
+
         for i, layer in enumerate(self.layers):
+            # Compute spatial bias from previous layer's predictions
+            spatial_bias = self.compute_spatial_bias(prev_logits, prev_bboxes, memory_spatial_shapes, target.size(1))
+
             ref_points_input = ref_points_detach.unsqueeze(2)
             query_pos_embed = query_pos_head(ref_points_detach)
 
-            output = layer(output, ref_points_input, memory, memory_spatial_shapes, attn_mask, memory_mask, query_pos_embed)
+            output = layer(
+                output,
+                ref_points_input,
+                memory,
+                memory_spatial_shapes,
+                attn_mask,
+                memory_mask,
+                query_pos_embed,
+                spatial_bias=spatial_bias
+            )
 
             inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points_detach))
 
             if self.training:
-                dec_out_logits.append(score_head[i](output))
+                inter_logits = score_head[i](output)
+                dec_out_logits.append(inter_logits)
                 if i == 0:
                     dec_out_bboxes.append(inter_ref_bbox)
                 else:
                     dec_out_bboxes.append(F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points)))
-
+                prev_logits = inter_logits.detach()
+                prev_bboxes = inter_ref_bbox.detach()
             elif i == self.eval_idx:
-                dec_out_logits.append(score_head[i](output))
+                inter_logits = score_head[i](output)
+                dec_out_logits.append(inter_logits)
                 dec_out_bboxes.append(inter_ref_bbox)
                 break
 
