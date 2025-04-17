@@ -257,65 +257,34 @@ class TransformerDecoder(nn.Module):
             'R_Arytenoid cartilage': 5
         }
 
-    def compute_spatial_bias(self, logits, bboxes, spatial_shapes, num_queries, num_heads, num_points_list, alpha=1.0, delta=0.1):
-        """
-        Compute spatial bias for cross-attention based on vocal fold predictions.
-        
-        Args:
-            logits: (bs, num_queries, num_classes) or None
-            bboxes: (bs, num_queries, 4), [x1, y1, x2, y2] in [0,1] or None
-            spatial_shapes: List of [H, W] for each feature level
-            num_queries: int
-            num_heads: int
-            num_points_list: List of number of sampling points per level
-            alpha: Bias magnitude
-            delta: Margin for x-coordinate range
-        
-        Returns:
-            bias: (bs, num_queries, num_heads, total_points) or None
-        """
+    def compute_spatial_bias(self, logits, bboxes, spatial_shapes, num_queries, num_heads, num_points_list, alpha=1.0):
         if logits is None or bboxes is None:
             return None
 
         bs = logits.size(0)
         total_points = sum(num_points_list)
 
-        # Initialize bias tensor: same bias applied to all heads
+        # Initialize bias tensor
         bias = torch.zeros(bs, num_queries, num_heads, total_points, device=logits.device)
 
         for side in ['L', 'R']:
-            vocal_class = f'{side}_Vocal Fold'
             cartilage_class = f'{side}_Arytenoid cartilage'
-
-            # Find vocal fold with max probability
-            vocal_probs = logits[:, :, self.class_to_idx[vocal_class]]
-            max_prob, vocal_idx = vocal_probs.max(dim=1)
-            vocal_boxes = bboxes[torch.arange(bs), vocal_idx]  # (bs, 4)
-
-            # Identify cartilage queries
             cartilage_mask = logits.argmax(dim=-1) == self.class_to_idx[cartilage_class]
 
             for b in range(bs):
-                if max_prob[b] > 0.5:  # Confidence threshold
-                    x1, y1, x2, y2 = vocal_boxes[b]
+                if cartilage_mask[b].any():  # If there are any cartilage queries
                     point_idx = 0
                     for lvl, (H, W) in enumerate(spatial_shapes):
-                        # Convert to feature map coordinates
-                        x1_f, x2_f = x1 * W, x2 * W
-                        y2_f = y2 * H
-                        x_min, x_max = max(0, x1_f - delta * W), min(W, x2_f + delta * W)
-                        y_min = y2_f
+                        # Create a simple bias map based on y-coordinate
+                        y_coords = torch.linspace(0, 1, H, device=bias.device)
+                        bias_map = alpha * y_coords[:, None].expand(-1, W)  # Shape: [H, W]
 
-                        # Create bias map per level
-                        bias_map = torch.ones(H, W, device=bias.device) * (-alpha)
-                        for y in range(int(y_min), H):
-                            for x in range(int(x_min), int(x_max)):
-                                bias_map[y, x] = alpha
-
-                        # Assign bias to sampling points for this level
                         num_points = num_points_list[lvl]
                         for _ in range(num_points):
-                            bias[b, cartilage_mask[b], :, point_idx] = bias_map.flatten()
+                            # Compute a scalar bias for this sampling point
+                            scalar_bias = bias_map.mean()  # Or another aggregation like max()
+                            # Assign to all cartilage queries and heads for this point
+                            bias[b, cartilage_mask[b], :, point_idx] = scalar_bias
                             point_idx += 1
 
         return bias
