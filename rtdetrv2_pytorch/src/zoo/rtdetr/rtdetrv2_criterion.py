@@ -120,14 +120,20 @@ class RTDETRCriterionv2(nn.Module):
     def loss_relational(self, outputs, targets, indices, num_boxes):
         """Compute a relational loss to enforce spatial relationships between vocal folds and arytenoid cartilage."""
         loss = 0.0
+        device = outputs['pred_boxes'].device  # Get the device from model outputs
         for batch_idx, (src_indices, tgt_indices) in enumerate(indices):
-            gt_labels = targets[batch_idx]['labels']
+            gt_labels = targets[batch_idx]['labels'].to(device)  # Move ground truth labels to the correct device
             # Left side: vocal fold (0) and arytenoid cartilage (1)
             left_vf = (gt_labels == 0).nonzero(as_tuple=True)[0]
             left_ac = (gt_labels == 1).nonzero(as_tuple=True)[0]
             if len(left_vf) > 0 and len(left_ac) > 0:
                 s = left_vf[0]  # Ground truth index for left vocal fold
                 t = left_ac[0]  # Ground truth index for left arytenoid cartilage
+                # Move indices to the correct device
+                src_indices = src_indices.to(device)
+                tgt_indices = tgt_indices.to(device)
+                s = s.to(device)  # Ensure s is on the correct device
+                t = t.to(device)  # Ensure t is on the correct device
                 i = src_indices[tgt_indices == s]  # Prediction index for vocal fold
                 j = src_indices[tgt_indices == t]  # Prediction index for arytenoid cartilage
                 if len(i) > 0 and len(j) > 0:
@@ -149,10 +155,15 @@ class RTDETRCriterionv2(nn.Module):
             right_vf = (gt_labels == 4).nonzero(as_tuple=True)[0]
             right_ac = (gt_labels == 5).nonzero(as_tuple=True)[0]
             if len(right_vf) > 0 and len(right_ac) > 0:
-                s = right_vf[0]
-                t = right_ac[0]
-                i = src_indices[tgt_indices == s]
-                j = src_indices[tgt_indices == t]
+                s = right_vf[0]  # Ground truth index for right vocal fold
+                t = right_ac[0]  # Ground truth index for right arytenoid cartilage
+                # Move indices to the correct device
+                src_indices = src_indices.to(device)
+                tgt_indices = tgt_indices.to(device)
+                s = s.to(device)  # Ensure s is on the correct device
+                t = t.to(device)  # Ensure t is on the correct device
+                i = src_indices[tgt_indices == s]  # Prediction index for vocal fold
+                j = src_indices[tgt_indices == t]  # Prediction index for arytenoid cartilage
                 if len(i) > 0 and len(j) > 0:
                     i = i[0]
                     j = j[0]
