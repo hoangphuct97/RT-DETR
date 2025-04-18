@@ -79,6 +79,34 @@ class CocoEvaluator(object):
             print("IoU metric: {}".format(iou_type))
             coco_eval.summarize()
 
+            # Add per-category metrics
+            print("Per-category metrics for {}:".format(iou_type))
+            params = coco_eval.params
+            catIds = params.catIds
+            a = params.areaRngLbl.index('all')
+            m = params.maxDets.index(100)
+
+            for k, catId in enumerate(catIds):
+                cat_name = self.coco_gt.loadCats(catId)[0]['name']
+
+                # Compute AP for the category
+                precision = coco_eval.eval['precision'][:, :, k, a, m]
+                ap_per_iou = []
+                for t in range(len(params.iouThrs)):
+                    p = precision[t, :]
+                    p = p[p > -1]
+                    if p.size > 0:
+                        ap_per_iou.append(np.mean(p))
+                    else:
+                        ap_per_iou.append(0)
+                ap = np.mean(ap_per_iou)
+
+                # Compute AR for the category
+                recall = coco_eval.eval['recall'][:, k, a, m]
+                ar = np.mean(recall[recall > -1]) if np.any(recall > -1) else 0
+
+                print(f"Category: {cat_name}, AP: {ap:.4f}, AR: {ar:.4f}")
+
     def prepare(self, predictions, iou_type):
         if iou_type == "bbox":
             return self.prepare_for_coco_detection(predictions)
