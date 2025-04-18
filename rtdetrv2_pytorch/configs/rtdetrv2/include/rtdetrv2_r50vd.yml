@@ -72,8 +72,8 @@ RTDETRPostProcessor:
 
 
 RTDETRCriterionv2:
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_relational: 1}
-  losses: ['vfl', 'boxes', 'relational']
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2}
+  losses: ['vfl', 'boxes']
   alpha: 0.75
   gamma: 2.0
 
