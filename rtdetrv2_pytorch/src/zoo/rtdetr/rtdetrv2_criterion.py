@@ -66,8 +66,8 @@ class RTDETRCriterionv2(nn.Module):
     
         # Define class weights
         class_weight = torch.ones(self.num_classes, device=src_logits.device)
-        class_weight[1] = 2.0  # Higher weight for left arytenoid cartilage
-        class_weight[5] = 2.0  # Higher weight for right arytenoid cartilage
+        class_weight[1] = 2.5  # Higher weight for left arytenoid cartilage
+        class_weight[5] = 2.5  # Higher weight for right arytenoid cartilage
     
         # Compute focal loss and apply class weights
         loss = torchvision.ops.sigmoid_focal_loss(src_logits, target, self.alpha, self.gamma, reduction='none')
@@ -101,8 +101,8 @@ class RTDETRCriterionv2(nn.Module):
 
         # Define class weights
         class_weight = torch.ones(self.num_classes, device=src_logits.device)
-        class_weight[1] = 2.0  # Higher weight for left arytenoid cartilage
-        class_weight[5] = 2.0  # Higher weight for right arytenoid cartilage
+        class_weight[1] = 2.5  # Higher weight for left arytenoid cartilage
+        class_weight[5] = 2.5  # Higher weight for right arytenoid cartilage
     
         # Adjust weight with class weights
         weight = (self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score) * class_weight[None, None, :]
@@ -131,69 +131,69 @@ class RTDETRCriterionv2(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
-    # def loss_relational(self, outputs, targets, indices, num_boxes):
-    #     """Compute a relational loss to enforce spatial relationships between vocal folds and arytenoid cartilage."""
-    #     loss = 0.0
-    #     device = outputs['pred_boxes'].device  # Get the device from model outputs
-    #     for batch_idx, (src_indices, tgt_indices) in enumerate(indices):
-    #         gt_labels = targets[batch_idx]['labels'].to(device)  # Move ground truth labels to the correct device
-    #         # Left side: vocal fold (0) and arytenoid cartilage (1)
-    #         left_vf = (gt_labels == 0).nonzero(as_tuple=True)[0]
-    #         left_ac = (gt_labels == 1).nonzero(as_tuple=True)[0]
-    #         if len(left_vf) > 0 and len(left_ac) > 0:
-    #             s = left_vf[0]  # Ground truth index for left vocal fold
-    #             t = left_ac[0]  # Ground truth index for left arytenoid cartilage
-    #             # Move indices to the correct device
-    #             src_indices = src_indices.to(device)
-    #             tgt_indices = tgt_indices.to(device)
-    #             s = s.to(device)  # Ensure s is on the correct device
-    #             t = t.to(device)  # Ensure t is on the correct device
-    #             i = src_indices[tgt_indices == s]  # Prediction index for vocal fold
-    #             j = src_indices[tgt_indices == t]  # Prediction index for arytenoid cartilage
-    #             if len(i) > 0 and len(j) > 0:
-    #                 i = i[0]
-    #                 j = j[0]
-    #                 pred_box_i = outputs['pred_boxes'][batch_idx, i]  # Vocal fold box
-    #                 pred_box_j = outputs['pred_boxes'][batch_idx, j]  # Arytenoid cartilage box
-    #                 cx_i, cy_i, w_i, h_i = pred_box_i
-    #                 cx_j, cy_j, w_j, h_j = pred_box_j
-    #                 # Compute box edges
-    #                 y_i_bottom = cy_i + h_i / 2
-    #                 y_j_top = cy_j - h_j / 2
-    #                 # Encourage x-alignment and y-position (arytenoid cartilage below vocal fold)
-    #                 x_loss = self.x_scale * torch.abs(cx_j - cx_i)
-    #                 y_loss = F.relu(y_j_top - y_i_bottom + self.margin)
-    #                 loss += x_loss + y_loss
-    # 
-    #         # Right side: vocal fold (4) and arytenoid cartilage (5)
-    #         right_vf = (gt_labels == 4).nonzero(as_tuple=True)[0]
-    #         right_ac = (gt_labels == 5).nonzero(as_tuple=True)[0]
-    #         if len(right_vf) > 0 and len(right_ac) > 0:
-    #             s = right_vf[0]  # Ground truth index for right vocal fold
-    #             t = right_ac[0]  # Ground truth index for right arytenoid cartilage
-    #             # Move indices to the correct device
-    #             src_indices = src_indices.to(device)
-    #             tgt_indices = tgt_indices.to(device)
-    #             s = s.to(device)  # Ensure s is on the correct device
-    #             t = t.to(device)  # Ensure t is on the correct device
-    #             i = src_indices[tgt_indices == s]  # Prediction index for vocal fold
-    #             j = src_indices[tgt_indices == t]  # Prediction index for arytenoid cartilage
-    #             if len(i) > 0 and len(j) > 0:
-    #                 i = i[0]
-    #                 j = j[0]
-    #                 pred_box_i = outputs['pred_boxes'][batch_idx, i]
-    #                 pred_box_j = outputs['pred_boxes'][batch_idx, j]
-    #                 cx_i, cy_i, w_i, h_i = pred_box_i
-    #                 cx_j, cy_j, w_j, h_j = pred_box_j
-    #                 # Compute box edges
-    #                 y_i_bottom = cy_i + h_i / 2
-    #                 y_j_top = cy_j - h_j / 2
-    #                 # Encourage x-alignment and y-position (arytenoid cartilage below vocal fold)
-    #                 x_loss = self.x_scale * torch.abs(cx_j - cx_i)
-    #                 y_loss = F.relu(y_j_top - y_i_bottom + self.margin)
-    #                 loss += x_loss + y_loss
-    # 
-    #     return {'loss_relational': loss}
+    def loss_relational(self, outputs, targets, indices, num_boxes):
+        """Compute a relational loss to enforce spatial relationships between vocal folds and arytenoid cartilage."""
+        loss = 0.0
+        device = outputs['pred_boxes'].device  # Get the device from model outputs
+        for batch_idx, (src_indices, tgt_indices) in enumerate(indices):
+            gt_labels = targets[batch_idx]['labels'].to(device)  # Move ground truth labels to the correct device
+            # Left side: vocal fold (0) and arytenoid cartilage (1)
+            left_vf = (gt_labels == 0).nonzero(as_tuple=True)[0]
+            left_ac = (gt_labels == 1).nonzero(as_tuple=True)[0]
+            if len(left_vf) > 0 and len(left_ac) > 0:
+                s = left_vf[0]  # Ground truth index for left vocal fold
+                t = left_ac[0]  # Ground truth index for left arytenoid cartilage
+                # Move indices to the correct device
+                src_indices = src_indices.to(device)
+                tgt_indices = tgt_indices.to(device)
+                s = s.to(device)  # Ensure s is on the correct device
+                t = t.to(device)  # Ensure t is on the correct device
+                i = src_indices[tgt_indices == s]  # Prediction index for vocal fold
+                j = src_indices[tgt_indices == t]  # Prediction index for arytenoid cartilage
+                if len(i) > 0 and len(j) > 0:
+                    i = i[0]
+                    j = j[0]
+                    pred_box_i = outputs['pred_boxes'][batch_idx, i]  # Vocal fold box
+                    pred_box_j = outputs['pred_boxes'][batch_idx, j]  # Arytenoid cartilage box
+                    cx_i, cy_i, w_i, h_i = pred_box_i
+                    cx_j, cy_j, w_j, h_j = pred_box_j
+                    # Compute box edges
+                    y_i_bottom = cy_i + h_i / 2
+                    y_j_top = cy_j - h_j / 2
+                    # Encourage x-alignment and y-position (arytenoid cartilage below vocal fold)
+                    x_loss = self.x_scale * torch.abs(cx_j - cx_i)
+                    y_loss = F.relu(y_j_top - y_i_bottom + self.margin)
+                    loss += x_loss + y_loss
+
+            # Right side: vocal fold (4) and arytenoid cartilage (5)
+            right_vf = (gt_labels == 4).nonzero(as_tuple=True)[0]
+            right_ac = (gt_labels == 5).nonzero(as_tuple=True)[0]
+            if len(right_vf) > 0 and len(right_ac) > 0:
+                s = right_vf[0]  # Ground truth index for right vocal fold
+                t = right_ac[0]  # Ground truth index for right arytenoid cartilage
+                # Move indices to the correct device
+                src_indices = src_indices.to(device)
+                tgt_indices = tgt_indices.to(device)
+                s = s.to(device)  # Ensure s is on the correct device
+                t = t.to(device)  # Ensure t is on the correct device
+                i = src_indices[tgt_indices == s]  # Prediction index for vocal fold
+                j = src_indices[tgt_indices == t]  # Prediction index for arytenoid cartilage
+                if len(i) > 0 and len(j) > 0:
+                    i = i[0]
+                    j = j[0]
+                    pred_box_i = outputs['pred_boxes'][batch_idx, i]
+                    pred_box_j = outputs['pred_boxes'][batch_idx, j]
+                    cx_i, cy_i, w_i, h_i = pred_box_i
+                    cx_j, cy_j, w_j, h_j = pred_box_j
+                    # Compute box edges
+                    y_i_bottom = cy_i + h_i / 2
+                    y_j_top = cy_j - h_j / 2
+                    # Encourage x-alignment and y-position (arytenoid cartilage below vocal fold)
+                    x_loss = self.x_scale * torch.abs(cx_j - cx_i)
+                    y_loss = F.relu(y_j_top - y_i_bottom + self.margin)
+                    loss += x_loss + y_loss
+
+        return {'loss_relational': loss}
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -212,7 +212,7 @@ class RTDETRCriterionv2(nn.Module):
             'boxes': self.loss_boxes,
             'focal': self.loss_labels_focal,
             'vfl': self.loss_labels_vfl,
-            # 'relational': self.loss_relational,
+            'relational': self.loss_relational,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)

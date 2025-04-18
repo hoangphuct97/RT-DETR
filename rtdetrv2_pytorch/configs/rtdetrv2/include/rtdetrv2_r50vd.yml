@@ -66,14 +66,14 @@ RTDETRTransformerv2:
 
 
 RTDETRPostProcessor:
-  num_top_queries: 6
+  num_top_queries: 300
   num_classes: 6
   remap_mscoco_category: True
 
 
 RTDETRCriterionv2:
-  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2,}
-  losses: ['vfl', 'boxes']
+  weight_dict: {loss_vfl: 1, loss_bbox: 5, loss_giou: 2, loss_relational: 1}
+  losses: ['vfl', 'boxes', 'relational']
   alpha: 0.75
   gamma: 2.0
 
