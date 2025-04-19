@@ -116,15 +116,43 @@ class RTDETRCriterionv2(nn.Module):
         return losses
 
     def loss_spatial(self, outputs, targets, indices, num_boxes):
-        """Custom loss enforcing spatial relationships between vocal folds and cartilages"""
+        """Custom loss enforcing spatial relationships between vocal folds and arytenoid cartilages"""
         pred_logits = outputs['pred_logits']
         pred_boxes = outputs['pred_boxes']
         pred_probs = torch.sigmoid(pred_logits)
         batch_size, num_queries = pred_logits.shape[:2]
 
-        total_loss = 0.0
-        vocal_classes = [0, 4]
-        cartilage_classes = [1, 5]
+        # Class indices
+        left_vocal_fold_idx = 0  # Adjust to your actual class index
+        right_vocal_fold_idx = 4  # Adjust to your actual class index
+        left_arytenoid_idx = 1  # Adjust to your actual class index
+        right_arytenoid_idx = 5  # Adjust to your actual class index
+
+        # Mapping between vocal folds and expected cartilages
+        vocal_to_cartilage = {
+            left_vocal_fold_idx: left_arytenoid_idx,
+            right_vocal_fold_idx: right_arytenoid_idx
+        }
+
+        # Updated parameters based on the image for expected cartilage position relative to vocal fold
+        position_params = {
+            left_vocal_fold_idx: {
+                'cx_offset': 0.15,  # Slightly medial (toward center)
+                'cy_offset': 0.9,  # Below vocal fold (90% of height)
+                'width_ratio': 0.5,  # 50% of vocal fold width
+                'height_ratio': 0.5  # 50% of vocal fold height
+            },
+            right_vocal_fold_idx: {
+                'cx_offset': -0.15,  # Slightly medial (toward center) - negative for right side
+                'cy_offset': 0.9,  # Below vocal fold (90% of height)
+                'width_ratio': 0.5,  # 50% of vocal fold width
+                'height_ratio': 0.5  # 50% of vocal fold height
+            }
+        }
+
+        # Initialize loss as a tensor with value 0
+        total_loss = torch.tensor(0.0, device=pred_logits.device)
+        num_relationships = 0
 
         for batch_idx in range(batch_size):
             # Get matched predictions and targets
@@ -132,48 +160,90 @@ class RTDETRCriterionv2(nn.Module):
             if len(src_idx) == 0:
                 continue
 
-            matched_boxes = pred_boxes[batch_idx][src_idx]
-            matched_probs = pred_probs[batch_idx][src_idx]
-            target_labels = targets[batch_idx]['labels'][tgt_idx]
+            # Process each vocal fold in predictions
+            for i in range(num_queries):
+                vocal_class_probs = pred_probs[batch_idx, i, [left_vocal_fold_idx, right_vocal_fold_idx]]
+                max_vocal_prob, max_vocal_idx = torch.max(vocal_class_probs, dim=0)
+                vocal_class = [left_vocal_fold_idx, right_vocal_fold_idx][max_vocal_idx]
 
-            for i, target_label in enumerate(target_labels):
-                if target_label.item() not in vocal_classes:
-                    continue
+                # If the prediction is confidently a vocal fold (confidence > threshold)
+                if max_vocal_prob > 0.5:  # Confidence threshold
+                    num_relationships += 1
 
-                # Determine expected cartilage class and position
-                is_left = target_label.item() == vocal_classes[0]
-                cartilage_class = cartilage_classes[0] if is_left else cartilage_classes[1]
+                    # Get corresponding vocal fold box
+                    vf_box = pred_boxes[batch_idx, i]
+                    cx, cy, w, h = vf_box.unbind(-1)
 
-                # Vocal fold box parameters
-                vf_box = matched_boxes[i]
-                cx, cy, w, h = vf_box.unbind(-1)
+                    # Calculate expected cartilage position
+                    params = position_params[vocal_class]
+                    exp_cart_cx = cx + params['cx_offset'] * w
+                    exp_cart_cy = cy + params['cy_offset'] * h
+                    exp_cart_w = w * params['width_ratio']
+                    exp_cart_h = h * params['height_ratio']
 
-                # Expected cartilage position (adjust these based on your anatomy)
-                if is_left:
-                    cart_cx = cx / 2
-                else:
-                    cart_cx = cx * 2
-                cart_cy = cy + h * 0.8  # Positioned below vocal fold
-                cart_w = w * 0.7
-                cart_h = h * 0.6
-                expected_cart_box = torch.stack([cart_cx, cart_cy, cart_w, cart_h], dim=-1)
+                    expected_cart_box = torch.stack([exp_cart_cx, exp_cart_cy, exp_cart_w, exp_cart_h], dim=-1)
 
-                # Find best matching cartilage prediction
-                cart_probs = pred_probs[batch_idx, :, cartilage_class]
-                cart_boxes = pred_boxes[batch_idx]
+                    # Get corresponding cartilage class
+                    cartilage_class = vocal_to_cartilage[vocal_class]
 
-                # Calculate position similarity score
-                position_sim = 1 - torch.abs(cart_boxes - expected_cart_box).mean(dim=-1)
-                combined_scores = cart_probs * position_sim
+                    # Find best matching cartilage prediction
+                    cart_probs = pred_probs[batch_idx, :, cartilage_class]
+                    cart_boxes = pred_boxes[batch_idx]
 
-                # Get highest score
-                max_score = torch.max(combined_scores)
+                    # Calculate IoU between expected cartilage box and all prediction boxes
+                    # Convert center-size format to corner format for IoU calculation
+                    expected_xmin = exp_cart_cx - 0.5 * exp_cart_w
+                    expected_ymin = exp_cart_cy - 0.5 * exp_cart_h
+                    expected_xmax = exp_cart_cx + 0.5 * exp_cart_w
+                    expected_ymax = exp_cart_cy + 0.5 * exp_cart_h
+                    expected_corners = torch.stack([expected_xmin, expected_ymin, expected_xmax, expected_ymax], dim=-1)
 
-                # Penalize if no good match found
-                threshold = 0.4  # Adjust based on validation
-                total_loss += torch.clamp(threshold - max_score, min=0)
+                    # Convert all prediction boxes to corner format
+                    pred_xmin = cart_boxes[:, 0] - 0.5 * cart_boxes[:, 2]
+                    pred_ymin = cart_boxes[:, 1] - 0.5 * cart_boxes[:, 3]
+                    pred_xmax = cart_boxes[:, 0] + 0.5 * cart_boxes[:, 2]
+                    pred_ymax = cart_boxes[:, 1] + 0.5 * cart_boxes[:, 3]
+                    pred_corners = torch.stack([pred_xmin, pred_ymin, pred_xmax, pred_ymax], dim=-1)
 
-        spatial_loss = total_loss / (num_boxes + 1e-6)
+                    # Calculate IoU
+                    ious = box_iou(expected_corners.unsqueeze(0), pred_corners)[0]
+
+                    # Combined score: cartilage class probability * IoU
+                    combined_scores = cart_probs * ious
+
+                    # Apply soft-max to get attention weights
+                    weights = torch.softmax(combined_scores * 10, dim=0)  # Temperature = 10
+
+                    # Calculate the expected cartilage score
+                    expected_cart_score = torch.sum(weights * combined_scores)
+
+                    # Calculate loss: encourage high cartilage scores at expected positions
+                    cart_loss = 1.0 - expected_cart_score
+                    total_loss += cart_loss
+
+                    # Also add loss to push cartilage predictions toward expected positions
+                    for j in range(num_queries):
+                        # If this prediction has high probability of being the corresponding cartilage
+                        if cart_probs[j] > 0.3:
+                            # Get current box
+                            curr_box = cart_boxes[j]
+                            # Calculate L1 loss between current and expected position
+                            box_loss = F.l1_loss(curr_box, expected_cart_box)
+                            # Weight by cartilage probability
+                            total_loss += box_loss * cart_probs[j] * 0.5  # 0.5 is the weight for this term
+
+                    # Add a term to enforce the presence of a cartilage when a vocal fold is detected
+                    if torch.max(cart_probs) < 0.3:
+                        # If no cartilage is detected with sufficient confidence
+                        presence_penalty = torch.tensor(0.8, device=pred_logits.device)  # Substantial penalty as tensor
+                        total_loss += presence_penalty * max_vocal_prob  # Scale by vocal fold confidence
+
+        # Normalize loss - ensure it's a tensor
+        if num_relationships > 0:
+            spatial_loss = total_loss / num_relationships
+        else:
+            spatial_loss = torch.tensor(0.0, device=pred_logits.device)
+
         return {'loss_spatial': spatial_loss}
 
     def _get_src_permutation_idx(self, indices):
