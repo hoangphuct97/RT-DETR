@@ -115,6 +115,67 @@ class RTDETRCriterionv2(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
+    def loss_spatial(self, outputs, targets, indices, num_boxes):
+        """Custom loss enforcing spatial relationships between vocal folds and cartilages"""
+        pred_logits = outputs['pred_logits']
+        pred_boxes = outputs['pred_boxes']
+        pred_probs = torch.sigmoid(pred_logits)
+        batch_size, num_queries = pred_logits.shape[:2]
+
+        total_loss = 0.0
+        vocal_classes = [0, 4]
+        cartilage_classes = [1, 5]
+
+        for batch_idx in range(batch_size):
+            # Get matched predictions and targets
+            src_idx, tgt_idx = indices[batch_idx]
+            if len(src_idx) == 0:
+                continue
+
+            matched_boxes = pred_boxes[batch_idx][src_idx]
+            matched_probs = pred_probs[batch_idx][src_idx]
+            target_labels = targets[batch_idx]['labels'][tgt_idx]
+
+            for i, target_label in enumerate(target_labels):
+                if target_label.item() not in vocal_classes:
+                    continue
+
+                # Determine expected cartilage class and position
+                is_left = target_label.item() == vocal_classes[0]
+                cartilage_class = cartilage_classes[0] if is_left else cartilage_classes[1]
+
+                # Vocal fold box parameters
+                vf_box = matched_boxes[i]
+                cx, cy, w, h = vf_box.unbind(-1)
+
+                # Expected cartilage position (adjust these based on your anatomy)
+                if is_left:
+                    cart_cx = cx / 2
+                else:
+                    cart_cx = cx * 2
+                cart_cy = cy + h * 0.8  # Positioned below vocal fold
+                cart_w = w * 0.7
+                cart_h = h * 0.6
+                expected_cart_box = torch.stack([cart_cx, cart_cy, cart_w, cart_h], dim=-1)
+
+                # Find best matching cartilage prediction
+                cart_probs = pred_probs[batch_idx, :, cartilage_class]
+                cart_boxes = pred_boxes[batch_idx]
+
+                # Calculate position similarity score
+                position_sim = 1 - torch.abs(cart_boxes - expected_cart_box).mean(dim=-1)
+                combined_scores = cart_probs * position_sim
+
+                # Get highest score
+                max_score = torch.max(combined_scores)
+
+                # Penalize if no good match found
+                threshold = 0.4  # Adjust based on validation
+                total_loss += torch.clamp(threshold - max_score, min=0)
+
+        spatial_loss = total_loss / (num_boxes + 1e-6)
+        return {'loss_spatial': spatial_loss}
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -132,6 +193,7 @@ class RTDETRCriterionv2(nn.Module):
             'boxes': self.loss_boxes,
             'focal': self.loss_labels_focal,
             'vfl': self.loss_labels_vfl,
+            'spatial': self.loss_spatial,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
