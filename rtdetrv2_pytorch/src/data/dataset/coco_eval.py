@@ -86,8 +86,19 @@ class CocoEvaluator(object):
             a = params.areaRngLbl.index('all')
             m = params.maxDets.index(100)
 
+            print("\n++++++++++ Category AP and AR ++++++++++")
             for k, catId in enumerate(catIds):
-                cat_name = self.coco_gt.loadCats(catId)[0]['name']
+                # Convert catId to Python int to avoid type issues
+                catId = int(catId)
+
+                # Try loadCats, fall back to direct cats access if it fails
+                cat_info = self.coco_gt.loadCats(catId)
+                if not cat_info:
+                    print(f"Warning: loadCats failed for category ID {catId}. Attempting direct access.")
+                    cat_info = self.coco_gt.cats.get(catId, {})
+                    cat_name = cat_info.get('name', f'Category_{catId}')
+                else:
+                    cat_name = cat_info[0].get('name', f'Category_{catId}')
 
                 # Compute AP for the category
                 precision = coco_eval.eval['precision'][:, :, k, a, m]
@@ -106,6 +117,8 @@ class CocoEvaluator(object):
                 ar = np.mean(recall[recall > -1]) if np.any(recall > -1) else 0
 
                 print(f"Category: {cat_name}, AP: {ap:.4f}, AR: {ar:.4f}")
+
+            print("++++++++++++++++++++++++++++++++++++++++\n")
 
     def prepare(self, predictions, iou_type):
         if iou_type == "bbox":
