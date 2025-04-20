@@ -433,7 +433,7 @@ class AnatomicalRelationshipModule(nn.Module):
                         candidates['batch_idx'].append(b)
 
         # Convert lists to tensors if we have candidates
-        if candidates['indices']:
+        if len(candidates['indices']) > 0:
             candidates['indices'] = torch.tensor(candidates['indices'], device=logits.device)
             candidates['boxes'] = torch.stack(candidates['boxes']).to(logits.device)
             candidates['classes'] = torch.tensor(candidates['classes'], device=logits.device)
@@ -522,7 +522,6 @@ class AnatomicalRelationshipModule(nn.Module):
         return intersection_area / union_area
 
 
-# Modified TransformerDecoder class that incorporates anatomical relationships
 class AnatomicalTransformerDecoder(TransformerDecoder):
     def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1,
                  num_classes=6,
@@ -541,6 +540,115 @@ class AnatomicalTransformerDecoder(TransformerDecoder):
             arytenoid_left_idx=arytenoid_left_idx,
             arytenoid_right_idx=arytenoid_right_idx
         )
+
+    def forward(self,
+                target,
+                ref_points_unact,
+                memory,
+                memory_spatial_shapes,
+                bbox_head,
+                score_head,
+                query_pos_head,
+                attn_mask=None,
+                memory_mask=None):
+
+        # Get original decoder outputs
+        dec_out_bboxes, dec_out_logits = super().forward(
+            target,
+            ref_points_unact,
+            memory,
+            memory_spatial_shapes,
+            bbox_head,
+            score_head,
+            query_pos_head,
+            attn_mask,
+            memory_mask
+        )
+
+        # Get last layer outputs
+        final_boxes = dec_out_bboxes[-1]  # [bs, num_queries, 4]
+        final_logits = dec_out_logits[-1]  # [bs, num_queries, num_classes]
+        final_features = target  # [bs, num_queries, hidden_dim]
+
+        # During training, just create a dummy loss to ensure all parameters are used
+        # This won't affect actual training but ensures all parameters receive gradients
+        if self.training:
+            # Get a random sample of features to use for dummy computation
+            sample_idx = torch.randint(0, final_features.shape[1], (1,), device=final_features.device)
+            sample_features = final_features[:, sample_idx]
+
+            # Process through the anatomical module components to ensure parameters are used
+            dummy_proj = self.anatomical_module.refinement_projector(sample_features)
+            dummy_box_delta = self.anatomical_module.box_refiner(dummy_proj)
+            dummy_score = self.anatomical_module.score_predictor(dummy_proj)
+
+            # Create a dummy loss with zero weight (won't affect actual training)
+            dummy_loss = (dummy_box_delta.sum() + dummy_score.sum()) * 0.0
+
+            # Add dummy loss to the last box output (with zero weight)
+            final_boxes = dec_out_bboxes[-1] + dummy_loss
+            dec_out_bboxes = list(dec_out_bboxes)
+            dec_out_bboxes[-1] = final_boxes
+            dec_out_bboxes = torch.stack(dec_out_bboxes)
+
+        # In inference mode, apply anatomical relationship refinement
+        else:
+            # Generate candidate boxes for missing arytenoids
+            candidates = self.anatomical_module.generate_candidate_boxes(final_logits, final_boxes)
+
+            # If we have candidates, refine them and add to outputs
+            if 'indices' in candidates and isinstance(candidates['indices'], torch.Tensor) and candidates['indices'].numel() > 0:
+                refined_boxes, refined_scores, target_classes, batch_indices = \
+                    self.anatomical_module.refine_candidate_boxes(final_features, memory, candidates)
+
+                if refined_boxes is not None:
+                    batch_size = final_boxes.shape[0]
+                    num_classes = final_logits.shape[-1]
+
+                    # For each batch, add the refined boxes to the outputs
+                    for i, b_idx in enumerate(batch_indices.unique()):
+                        b_mask = (batch_indices == b_idx)
+                        num_candidates = b_mask.sum()
+
+                        # Create new logits tensor for the candidates
+                        candidate_logits = torch.zeros(
+                            num_candidates, num_classes,
+                            device=final_logits.device
+                        )
+
+                        # Fill in confidence for target classes
+                        for j, (cls_idx, conf) in enumerate(zip(
+                                target_classes[b_mask],
+                                refined_scores[b_mask]
+                        )):
+                            candidate_logits[j, cls_idx] = conf
+
+                        # Add candidates to final outputs
+                        final_boxes = torch.cat([
+                            final_boxes,
+                            torch.zeros(
+                                batch_size, num_candidates, 4,
+                                device=final_boxes.device
+                            )
+                        ], dim=1)
+
+                        final_logits = torch.cat([
+                            final_logits,
+                            torch.zeros(
+                                batch_size, num_candidates, num_classes,
+                                device=final_logits.device
+                            )
+                        ], dim=1)
+
+                        # Add refined candidates to the correct batch
+                        final_boxes[b_idx, -num_candidates:] = refined_boxes[b_mask]
+                        final_logits[b_idx, -num_candidates:] = candidate_logits
+
+                    # Update the last output
+                    dec_out_bboxes[-1] = final_boxes
+                    dec_out_logits[-1] = final_logits
+
+        return dec_out_bboxes, dec_out_logits
 
     def forward(self,
                 target,
