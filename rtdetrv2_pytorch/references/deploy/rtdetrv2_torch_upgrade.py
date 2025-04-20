@@ -1,5 +1,6 @@
 """Enhanced visualization for detection model with CocoDetection ground truth support
 """
+import time
 
 import torch
 import torch.nn as nn
@@ -137,7 +138,7 @@ def visualize_detection(image, gt_labels=None, gt_boxes=None, pred_labels=None, 
     return gt_image, pred_image
 
 
-def save_visualization(images, output_dir='results', filename_base='detection'):
+def save_visualization(ground_truth, prediction, output_dir='results', filename_base='detection'):
     """
     Save visualization images to disk
     
@@ -148,10 +149,8 @@ def save_visualization(images, output_dir='results', filename_base='detection'):
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    suffixes = ['ground_truth', 'prediction']
-    for i, img in enumerate(images):
-        if i < len(suffixes):
-            img.save(os.path.join(output_dir, f"{filename_base}_{suffixes[i]}.jpg"))
+    ground_truth.save(os.path.join(output_dir, f"{filename_base}_ground_truth.jpg"))
+    prediction.save(os.path.join(output_dir, f"{filename_base}_prediction.jpg"))
 
 
 def get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id=None):
@@ -308,7 +307,7 @@ def main(args):
     )
 
     # Save results
-    # save_visualization(result_images, args.output_dir, os.path.basename(args.im_file).split('.')[0])
+    save_visualization(ground_truth, prediction, args.output_dir, os.path.basename(args.im_file).split('.')[0])
 
     return ground_truth, prediction
 
@@ -348,6 +347,8 @@ if __name__ == '__main__':
             ground_truths.append(ground_truth)
             predictions.append(prediction)
 
-        export_results(ground_truths, predictions, "results/output.pdf")
+        time_str = time.strftime("%Y%m%d_%H%M%S")
+        output_file_name = f"results/output_{time_str}.pdf"
+        export_results(ground_truths, predictions, output_file_name)
     else:
         main(args)
