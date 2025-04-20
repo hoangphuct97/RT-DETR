@@ -602,47 +602,36 @@ class AnatomicalTransformerDecoder(TransformerDecoder):
                     self.anatomical_module.refine_candidate_boxes(final_features, memory, candidates)
 
                 if refined_boxes is not None:
-                    batch_size = final_boxes.shape[0]
                     num_classes = final_logits.shape[-1]
 
                     # For each batch, add the refined boxes to the outputs
                     for i, b_idx in enumerate(batch_indices.unique()):
                         b_mask = (batch_indices == b_idx)
-                        num_candidates = b_mask.sum()
+                        num_candidates = b_mask.sum().item()
 
-                        # Create new logits tensor for the candidates
-                        candidate_logits = torch.zeros(
-                            num_candidates, num_classes,
-                            device=final_logits.device
-                        )
-
-                        # Fill in confidence for target classes
+                        # Create logits for candidates
+                        candidate_logits = torch.zeros(num_candidates, num_classes, device=final_logits.device)
                         for j, (cls_idx, conf) in enumerate(zip(
                                 target_classes[b_mask],
                                 refined_scores[b_mask]
                         )):
                             candidate_logits[j, cls_idx] = conf
 
-                        # Add candidates to final outputs
-                        final_boxes = torch.cat([
-                            final_boxes,
-                            torch.zeros(
-                                batch_size, num_candidates, 4,
-                                device=final_boxes.device
-                            )
-                        ], dim=1)
+                        # Sort existing predictions by confidence
+                        max_scores, _ = final_logits[b_idx].max(dim=-1)
+                        sorted_indices = torch.argsort(max_scores, descending=True)
 
-                        final_logits = torch.cat([
-                            final_logits,
-                            torch.zeros(
-                                batch_size, num_candidates, num_classes,
-                                device=final_logits.device
-                            )
-                        ], dim=1)
+                        # Replace the lowest confidence predictions with our candidates
+                        replacement_indices = sorted_indices[-num_candidates:]
 
-                        # Add refined candidates to the correct batch
-                        final_boxes[b_idx, -num_candidates:] = refined_boxes[b_mask]
-                        final_logits[b_idx, -num_candidates:] = candidate_logits
+                        # Update boxes and logits
+                        for idx, (box, logits) in enumerate(zip(
+                                refined_boxes[b_mask],
+                                candidate_logits
+                        )):
+                            replace_idx = replacement_indices[idx]
+                            final_boxes[b_idx, replace_idx] = box
+                            final_logits[b_idx, replace_idx] = logits
 
                     # Update the last output
                     dec_out_bboxes[-1] = final_boxes
