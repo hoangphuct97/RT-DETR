@@ -116,11 +116,12 @@ class RTDETRCriterionv2(nn.Module):
         return losses
 
     def loss_spatial(self, outputs, targets, indices, num_boxes):
-        """Custom loss enforcing spatial relationships between vocal folds and arytenoid cartilages"""
+        """Optimized custom loss enforcing spatial relationships between vocal folds and cartilages"""
         pred_logits = outputs['pred_logits']
         pred_boxes = outputs['pred_boxes']
         pred_probs = torch.sigmoid(pred_logits)
         batch_size, num_queries = pred_logits.shape[:2]
+        device = pred_logits.device
 
         # Class indices
         left_vocal_fold_idx = 0
@@ -128,125 +129,119 @@ class RTDETRCriterionv2(nn.Module):
         left_arytenoid_idx = 1
         right_arytenoid_idx = 5
 
-        # Mapping between vocal folds and expected cartilages
+        # Mapping and parameters
         vocal_to_cartilage = {
-            left_vocal_fold_idx: left_arytenoid_idx,
-            right_vocal_fold_idx: right_arytenoid_idx
+            left_vocal_fold_idx: {"class": left_arytenoid_idx, "cx_offset": 0.15, "cy_offset": 0.9, "width_ratio": 0.5,
+                                  "height_ratio": 0.5},
+            right_vocal_fold_idx: {"class": right_arytenoid_idx, "cx_offset": -0.15, "cy_offset": 0.9,
+                                   "width_ratio": 0.5, "height_ratio": 0.5}
         }
 
-        # Parameters for expected cartilage positions
-        position_params = {
-            left_vocal_fold_idx: {
-                'cx_offset': 0.15,
-                'cy_offset': 0.9,
-                'width_ratio': 0.5,
-                'height_ratio': 0.5
-            },
-            right_vocal_fold_idx: {
-                'cx_offset': -0.15,
-                'cy_offset': 0.9,
-                'width_ratio': 0.5,
-                'height_ratio': 0.5
-            }
-        }
+        # Initialize loss as a tensor with value 0
+        total_loss = torch.tensor(0.0, device=device)
+        num_relationships = 0
 
-        # Initialize loss and relationship counter
-        total_loss = torch.tensor(0.0, device=pred_logits.device)
-        total_num_relationships = 0
-
+        # Process all batches at once where possible
         for batch_idx in range(batch_size):
+            # Skip empty batches
             src_idx, tgt_idx = indices[batch_idx]
             if len(src_idx) == 0:
                 continue
 
-            batch_pred_probs = pred_probs[batch_idx]  # Q x C
-            batch_pred_boxes = pred_boxes[batch_idx]  # Q x 4
+            # Get vocal fold probabilities for both classes at once
+            vocal_fold_probs = pred_probs[batch_idx, :, [left_vocal_fold_idx, right_vocal_fold_idx]]
+            max_vocal_probs, max_vocal_indices = torch.max(vocal_fold_probs, dim=1)
 
-            # Identify vocal fold predictions
-            vocal_probs = batch_pred_probs[:, [left_vocal_fold_idx, right_vocal_fold_idx]]  # Q x 2
-            max_vocal_probs, max_indices = torch.max(vocal_probs, dim=1)  # Q
-            vocal_mask = max_vocal_probs > 0.5
-            vocal_indices = torch.where(vocal_mask)[0]
-            num_vocal = vocal_indices.size(0)
-            total_num_relationships += num_vocal
+            # Create a mask for confident vocal fold predictions
+            confident_vocal_mask = max_vocal_probs > 0.5
+            if not confident_vocal_mask.any():
+                continue
 
-            if num_vocal > 0:
-                # Get vocal fold classes and boxes
-                vocal_classes = torch.where(max_indices[vocal_mask] == 0,
-                                            left_vocal_fold_idx,
-                                            right_vocal_fold_idx)
-                vf_boxes = batch_pred_boxes[vocal_indices]
+            # Get indices of confident vocal fold predictions
+            confident_indices = torch.where(confident_vocal_mask)[0]
+            num_relationships += confident_indices.size(0)
 
-                # Compute expected cartilage boxes
-                exp_cart_boxes = torch.stack([
-                    self.compute_expected_boxes(vf_boxes[i:i+1], position_params[vocal_classes[i].item()])[0]
-                    for i in range(num_vocal)
-                ])
+            for i in confident_indices:
+                vocal_class = [left_vocal_fold_idx, right_vocal_fold_idx][max_vocal_indices[i]]
+                max_vocal_prob = max_vocal_probs[i]
 
-                # Convert to corner format for IoU
-                exp_cart_corners = self.box_convert(exp_cart_boxes, 'cxcywh', 'xyxy')
-                pred_corners = self.box_convert(batch_pred_boxes, 'cxcywh', 'xyxy')
+                # Get vocal fold box
+                vf_box = pred_boxes[batch_idx, i]
+                cx, cy, w, h = vf_box.unbind(-1)
 
-                # Compute IoUs
-                ious = box_iou(exp_cart_corners, pred_corners)[0]
+                # Get parameters for this vocal fold class
+                params = vocal_to_cartilage[vocal_class]
+                cartilage_class = params["class"]
 
-                # Process each vocal fold's corresponding cartilage
-                cart_probs = torch.stack([
-                    batch_pred_probs[:, vocal_to_cartilage[vocal_classes[i].item()]]
-                    for i in range(num_vocal)
-                ])  # num_vocal x Q
+                # Calculate expected cartilage position (vectorized)
+                exp_cart_cx = cx + params['cx_offset'] * w
+                exp_cart_cy = cy + params['cy_offset'] * h
+                exp_cart_w = w * params['width_ratio']
+                exp_cart_h = h * params['height_ratio']
+                expected_cart_box = torch.stack([exp_cart_cx, exp_cart_cy, exp_cart_w, exp_cart_h], dim=-1)
 
-                # Compute cartilage alignment loss
-                print("cart_probs type:", type(cart_probs), "shape:", cart_probs.shape, "dtype:", cart_probs.dtype, "device:", cart_probs.device)
-                print("ious type:", type(ious), "shape:", ious.shape, "dtype:", ious.dtype, "device:", ious.device)
+                # Get cartilage probabilities for all queries
+                cart_probs = pred_probs[batch_idx, :, cartilage_class]
+
+                # Calculate IoU more efficiently
+                # Convert to corners format
+                expected_corners = torch.tensor([
+                    exp_cart_cx - 0.5 * exp_cart_w,  # xmin
+                    exp_cart_cy - 0.5 * exp_cart_h,  # ymin
+                    exp_cart_cx + 0.5 * exp_cart_w,  # xmax
+                    exp_cart_cy + 0.5 * exp_cart_h  # ymax
+                ], device=device).unsqueeze(0)
+
+                # Convert all prediction boxes to corners format at once
+                all_boxes = pred_boxes[batch_idx]
+                all_corners = torch.stack([
+                    all_boxes[:, 0] - 0.5 * all_boxes[:, 2],  # xmin
+                    all_boxes[:, 1] - 0.5 * all_boxes[:, 3],  # ymin
+                    all_boxes[:, 0] + 0.5 * all_boxes[:, 2],  # xmax
+                    all_boxes[:, 1] + 0.5 * all_boxes[:, 3]  # ymax
+                ], dim=1)
+
+                # Calculate IoUs
+                ious = box_iou(expected_corners, all_corners)[0]
+
+                # Combined score and softmax
                 combined_scores = cart_probs * ious
-                combined_scores = cart_probs * ious  # num_vocal x Q
-                weights = torch.softmax(combined_scores * 10, dim=1)
-                expected_cart_scores = (weights * combined_scores).sum(dim=1)
-                cart_loss = (1.0 - expected_cart_scores).sum()
+                weights = torch.softmax(combined_scores * 10, dim=0)
+                expected_cart_score = torch.sum(weights * combined_scores)
+
+                # Calculate loss
+                cart_loss = 1.0 - expected_cart_score
                 total_loss += cart_loss
 
-                # Compute box position loss
-                for i in range(num_vocal):
-                    cart_prob = cart_probs[i]
-                    high_prob_indices = torch.where(cart_prob > 0.3)[0]
-                    if high_prob_indices.size(0) > 0:
-                        curr_boxes = batch_pred_boxes[high_prob_indices]
-                        exp_box = exp_cart_boxes[i:i+1]
-                        box_losses = F.l1_loss(curr_boxes, exp_box.expand_as(curr_boxes), reduction='none').sum(dim=1)
-                        weighted_box_loss = (box_losses * cart_prob[high_prob_indices] * 0.5).sum()
-                        total_loss += weighted_box_loss
+                # Use vectorized operations for box position loss
+                # Select cartilage candidates with probability > threshold
+                cart_candidates = cart_probs > 0.3
+                if cart_candidates.any():
+                    candidate_indices = torch.where(cart_candidates)[0]
+                    candidate_boxes = all_boxes[candidate_indices]
+                    candidate_probs = cart_probs[candidate_indices]
 
-                    # Presence penalty
-                    if cart_prob.max() < 0.3:
-                        total_loss += 0.8 * max_vocal_probs[vocal_indices[i]]
+                    # Calculate L1 losses for all candidates at once
+                    box_losses = F.l1_loss(candidate_boxes,
+                                           expected_cart_box.unsqueeze(0).expand(len(candidate_indices), -1),
+                                           reduction='none').mean(dim=1)
+
+                    # Weight by probabilities
+                    weighted_box_losses = box_losses * candidate_probs * 0.5
+                    total_loss += weighted_box_losses.sum()
+
+                # Presence penalty (if no cartilage detected)
+                if torch.max(cart_probs) < 0.3:
+                    presence_penalty = torch.tensor(0.8, device=device)
+                    total_loss += presence_penalty * max_vocal_prob
 
         # Normalize loss
-        spatial_loss = total_loss / total_num_relationships if total_num_relationships > 0 else torch.tensor(0.0, device=pred_logits.device)
-        return {'loss_spatial': spatial_loss}
-
-    def compute_expected_boxes(self, boxes, params):
-        cx, cy, w, h = boxes.unbind(-1)
-        cx_offset = params['cx_offset']
-        cy_offset = params['cy_offset']
-        width_ratio = params['width_ratio']
-        height_ratio = params['height_ratio']
-        exp_cx = cx + cx_offset * w
-        exp_cy = cy + cy_offset * h
-        exp_w = w * width_ratio
-        exp_h = h * height_ratio
-        return torch.stack([exp_cx, exp_cy, exp_w, exp_h], dim=-1)
-
-    def box_convert(self, boxes, in_fmt, out_fmt):
-        if in_fmt == 'cxcywh' and out_fmt == 'xyxy':
-            cx, cy, w, h = boxes.unbind(-1)
-            xmin = cx - 0.5 * w
-            ymin = cy - 0.5 * h
-            xmax = cx + 0.5 * w
-            ymax = cy + 0.5 * h
-            return torch.stack([xmin, ymin, xmax, ymax], dim=-1)
+        if num_relationships > 0:
+            spatial_loss = total_loss / num_relationships
         else:
-            raise NotImplementedError(f"Conversion from {in_fmt} to {out_fmt} not implemented.")
+            spatial_loss = torch.tensor(0.0, device=device)
+
+        return {'loss_spatial': spatial_loss}
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
