@@ -330,17 +330,20 @@ class AnatomicalQueryEncoder(nn.Module):
         ])
 
         # Pairwise relationship modeling
-        self.pair_relation = nn.MultiheadAttention(
-            hidden_dim,
-            num_heads=4,
-            dropout=0.1,
-            batch_first=True
+        self.relation_projection = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
         )
+
+        # Default projection layer to ensure all parameters are used
+        self.fallback_projection = nn.Linear(hidden_dim, hidden_dim)
 
         self._reset_parameters()
 
     def _reset_parameters(self):
-        for module in [self.relation_encoder, self.feature_enhancer]:
+        for module in [self.relation_encoder, self.feature_enhancer, self.relation_projection]:
             for layer in module:
                 if isinstance(layer, nn.Linear):
                     nn.init.xavier_uniform_(layer.weight)
@@ -350,6 +353,9 @@ class AnatomicalQueryEncoder(nn.Module):
         for proj in self.class_projections:
             nn.init.xavier_uniform_(proj.weight)
             nn.init.constant_(proj.bias, 0)
+
+        nn.init.xavier_uniform_(self.fallback_projection.weight)
+        nn.init.constant_(self.fallback_projection.bias, 0)
 
     def forward(self, query_embed, query_content, query_boxes):
         """
@@ -364,10 +370,14 @@ class AnatomicalQueryEncoder(nn.Module):
         batch_size, num_queries = query_content.shape[:2]
 
         # Compute potential class assignments based on current features
+        class_logits = [proj(query_content) for proj in self.class_projections]
+        class_max_values = [logit.max(dim=-1)[0] for logit in class_logits]
         class_probs = torch.stack([
-            torch.softmax(proj(query_content).max(dim=-1)[0], dim=-1)
-            for proj in self.class_projections
+            torch.softmax(max_val, dim=-1) for max_val in class_max_values
         ], dim=-1)  # [bs, num_queries, num_classes]
+
+        # Ensure all parameters in class_projections are used
+        dummy_sum = sum(logit.sum() * 0.0 for logit in class_logits)
 
         # Encode spatial features with current box predictions
         box_features = torch.cat([query_content, query_boxes], dim=-1)
@@ -377,65 +387,82 @@ class AnatomicalQueryEncoder(nn.Module):
         enhanced_queries = torch.cat([query_content, relation_features], dim=-1)
         enhanced_queries = self.feature_enhancer(enhanced_queries)
 
-        # Generate attention masks to model pairwise relationships
-        # For each vocal fold query, attend more to potential arytenoid regions
-        attn_mask = torch.zeros(
-            batch_size, num_queries, num_queries,
-            device=query_content.device
-        )
+        # Ensure all parameters in relation_encoder are used
+        dummy_sum = dummy_sum + relation_features.sum() * 0.0
 
-        # Calculate relative positions for attention weighting
+        # Apply the fallback projection to ensure its parameters are used
+        fallback_features = self.fallback_projection(query_content)
+        dummy_sum = dummy_sum + fallback_features.sum() * 0.0
+
+        # Direct modeling of anatomical relationships
+        relation_enhanced = torch.zeros_like(enhanced_queries)
+        has_enhancement = torch.zeros(batch_size, num_queries, 1, device=query_content.device)
+
         for b in range(batch_size):
+            # For each potential vocal fold query
             for i in range(num_queries):
-                # Check if this query might be a vocal fold
+                # Determine if this is likely to be a vocal fold
                 is_left_fold = class_probs[b, i, self.vocal_fold_left_idx] > 0.5
                 is_right_fold = class_probs[b, i, self.vocal_fold_right_idx] > 0.5
 
                 if is_left_fold or is_right_fold:
-                    # This is a potential vocal fold, find potential arytenoid locations
                     box_i = query_boxes[b, i]  # (x, y, w, h)
 
+                    # Find potential arytenoid regions
+                    potential_arytenoids = []
                     for j in range(num_queries):
                         if i == j:
                             continue
 
                         box_j = query_boxes[b, j]
 
-                        # Check if box_j is below box_i (arytenoid region)
+                        # Check if box_j is below box_i (arytenoid is below vocal fold)
                         is_below = box_j[1] > box_i[1]
 
                         # Check if box_j is on the correct side (left/right)
                         is_correct_side = True
                         if is_left_fold:
+                            # For left vocal fold, arytenoid should be on the left side
                             is_correct_side = box_j[0] <= box_i[0] + box_i[2] * 0.25
                         elif is_right_fold:
+                            # For right vocal fold, arytenoid should be on the right side
                             is_correct_side = box_j[0] >= box_i[0] - box_i[2] * 0.25
 
-                        # If potential arytenoid, increase attention weight
+                        # If potential arytenoid, add to list
                         if is_below and is_correct_side:
-                            attn_mask[b, i, j] = 1.0
+                            potential_arytenoids.append(j)
 
-        # Apply pairwise relationship attention
-        # Convert attention weights to a proper attention mask for MultiheadAttention
-        attn_mask = attn_mask.view(batch_size * num_queries, num_queries)
+                    # If we found potential arytenoids, enhance the vocal fold representation
+                    if potential_arytenoids:
+                        # Average the features of potential arytenoids
+                        arytenoid_features = torch.mean(
+                            enhanced_queries[b, potential_arytenoids],
+                            dim=0
+                        )
 
-        # Reshape for batch processing
-        flat_queries = enhanced_queries.view(batch_size * num_queries, 1, self.hidden_dim)
-        repeated_queries = enhanced_queries.repeat(1, 1, num_queries).view(
-            batch_size * num_queries, num_queries, self.hidden_dim
-        )
+                        # Combine vocal fold and arytenoid features
+                        combined_features = torch.cat([
+                            enhanced_queries[b, i],
+                            arytenoid_features
+                        ], dim=0)
 
-        # Apply relationship-aware attention
-        relation_enhanced, _ = self.pair_relation(
-            flat_queries,
-            repeated_queries,
-            repeated_queries,
-            attn_mask=attn_mask.bool()
-        )
+                        # Project to get relationship-enhanced features
+                        relation_enhanced[b, i] = self.relation_projection(combined_features)
+                        has_enhancement[b, i] = 1.0
 
-        # Reshape back and combine with original enhanced queries
-        relation_enhanced = relation_enhanced.view(batch_size, num_queries, self.hidden_dim)
-        final_queries = enhanced_queries + relation_enhanced
+        # Ensure there's always at least minimal use of the relation_projection
+        if has_enhancement.sum() == 0:
+            # Create dummy features to pass through relation_projection
+            dummy_features = torch.cat([
+                enhanced_queries[:1, :1].view(-1),
+                enhanced_queries[:1, :1].view(-1)
+            ], dim=0)
+            dummy_output = self.relation_projection(dummy_features) * 0.0
+            dummy_sum = dummy_sum + dummy_output.sum() * 0.0
+
+        # Combine with original enhanced queries with a small epsilon from dummy_sum
+        # to ensure all parameters are involved in the computation graph
+        final_queries = enhanced_queries + relation_enhanced * has_enhancement + dummy_sum
 
         return final_queries
 
