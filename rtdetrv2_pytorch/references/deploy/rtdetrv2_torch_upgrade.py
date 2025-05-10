@@ -1,5 +1,6 @@
 """Enhanced visualization for detection model with CocoDetection ground truth support
 """
+import time
 
 import torch
 import torch.nn as nn
@@ -348,6 +349,8 @@ if __name__ == '__main__':
             ground_truths.append(ground_truth)
             predictions.append(prediction)
 
-        export_results(ground_truths, predictions, "results/output.pdf")
+        time_str = time.strftime("%Y%m%d_%H%M%S")
+        output_file_name = f"results/output_{time_str}.pdf"
+        export_results(ground_truths, predictions, output_file_name)
     else:
         main(args)
