@@ -35,6 +35,212 @@ class MLP(nn.Module):
         return x
 
 
+class SpatialRelationshipModule(nn.Module):
+    """Module to learn spatial relationships between anatomical structures"""
+
+    def __init__(self, hidden_dim, num_classes, vocal_arytenoid_pairs):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_classes = num_classes
+        self.vocal_arytenoid_pairs = vocal_arytenoid_pairs  # [(vocal_cls, arytenoid_cls), ...]
+
+        # Relationship embedding for each pair
+        self.relationship_embeddings = nn.ModuleDict()
+        for vocal_cls, arytenoid_cls in vocal_arytenoid_pairs:
+            pair_key = f"{vocal_cls}_{arytenoid_cls}"
+            self.relationship_embeddings[pair_key] = nn.Sequential(
+                nn.Linear(hidden_dim * 2 + 8, hidden_dim),  # 2 features + 8 spatial features
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 1)  # Relationship strength score
+            )
+
+        # Spatial feature extractor
+        self.spatial_encoder = nn.Sequential(
+            nn.Linear(8, hidden_dim // 4),  # 8 spatial features
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, hidden_dim // 4)
+        )
+
+        # Feature refinement based on relationships
+        self.feature_refiner = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim + hidden_dim // 4, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            ) for _ in range(len(vocal_arytenoid_pairs))
+        ])
+
+    def compute_spatial_features(self, boxes1, boxes2):
+        """Compute spatial relationship features between two sets of boxes"""
+        # boxes format: [cx, cy, w, h]
+        cx1, cy1, w1, h1 = boxes1.unbind(-1)
+        cx2, cy2, w2, h2 = boxes2.unbind(-1)
+
+        # Relative position
+        rel_x = cx2 - cx1
+        rel_y = cy2 - cy1
+
+        # Relative size
+        rel_w = w2 / (w1 + 1e-8)
+        rel_h = h2 / (h1 + 1e-8)
+
+        # Distance
+        distance = torch.sqrt(rel_x ** 2 + rel_y ** 2)
+
+        # Angle
+        angle = torch.atan2(rel_y, rel_x)
+
+        # Overlap (IoU approximation)
+        overlap = self.compute_overlap_approx(boxes1, boxes2)
+
+        # Aspect ratio difference
+        aspect_diff = (w2 / h2) - (w1 / h1)
+
+        return torch.stack([rel_x, rel_y, rel_w, rel_h, distance, angle, overlap, aspect_diff], dim=-1)
+
+    def compute_overlap_approx(self, boxes1, boxes2):
+        """Approximate overlap between boxes"""
+        cx1, cy1, w1, h1 = boxes1.unbind(-1)
+        cx2, cy2, w2, h2 = boxes2.unbind(-1)
+
+        # Convert to corner coordinates
+        x1_min, y1_min = cx1 - w1 / 2, cy1 - h1 / 2
+        x1_max, y1_max = cx1 + w1 / 2, cy1 + h1 / 2
+        x2_min, y2_min = cx2 - w2 / 2, cy2 - h2 / 2
+        x2_max, y2_max = cx2 + w2 / 2, cy2 + h2 / 2
+
+        # Intersection
+        inter_xmin = torch.max(x1_min, x2_min)
+        inter_ymin = torch.max(y1_min, y2_min)
+        inter_xmax = torch.min(x1_max, x2_max)
+        inter_ymax = torch.min(y1_max, y2_max)
+
+        inter_w = torch.clamp(inter_xmax - inter_xmin, min=0)
+        inter_h = torch.clamp(inter_ymax - inter_ymin, min=0)
+        inter_area = inter_w * inter_h
+
+        # Union
+        area1 = w1 * h1
+        area2 = w2 * h2
+        union_area = area1 + area2 - inter_area
+
+        return inter_area / (union_area + 1e-8)
+
+    def forward(self, features, pred_boxes, pred_logits):
+        """
+        Args:
+            features: [bs, num_queries, hidden_dim]
+            pred_boxes: [bs, num_queries, 4]
+            pred_logits: [bs, num_queries, num_classes]
+        """
+        bs, num_queries, _ = features.shape
+
+        # Get class predictions
+        pred_scores = F.softmax(pred_logits, dim=-1)
+        pred_classes = pred_scores.argmax(dim=-1)
+
+        relationship_losses = []
+        refined_features = features.clone()
+
+        for pair_idx, (vocal_cls, arytenoid_cls) in enumerate(self.vocal_arytenoid_pairs):
+            pair_key = f"{vocal_cls}_{arytenoid_cls}"
+
+            # Find vocal fold and arytenoid candidates
+            vocal_mask = pred_classes == vocal_cls
+            arytenoid_mask = pred_classes == arytenoid_cls
+
+            if not (vocal_mask.any() and arytenoid_mask.any()):
+                continue
+
+            # For each vocal fold, find relationships with arytenoids
+            for b in range(bs):
+                vocal_indices = torch.where(vocal_mask[b])[0]
+                arytenoid_indices = torch.where(arytenoid_mask[b])[0]
+
+                if len(vocal_indices) == 0 or len(arytenoid_indices) == 0:
+                    continue
+
+                for v_idx in vocal_indices:
+                    vocal_box = pred_boxes[b, v_idx]
+                    vocal_feat = features[b, v_idx]
+
+                    for a_idx in arytenoid_indices:
+                        arytenoid_box = pred_boxes[b, a_idx]
+                        arytenoid_feat = features[b, a_idx]
+
+                        # Compute spatial features
+                        spatial_feat = self.compute_spatial_features(
+                            vocal_box.unsqueeze(0), arytenoid_box.unsqueeze(0)
+                        ).squeeze(0)
+
+                        # Encode spatial features
+                        encoded_spatial = self.spatial_encoder(spatial_feat)
+
+                        # Combine features
+                        combined_feat = torch.cat([vocal_feat, arytenoid_feat, spatial_feat], dim=0)
+
+                        # Predict relationship strength
+                        relationship_score = self.relationship_embeddings[pair_key](combined_feat)
+
+                        # Expected relationship (anatomical knowledge)
+                        expected_score = self.compute_expected_relationship(
+                            vocal_box, arytenoid_box, vocal_cls, arytenoid_cls
+                        )
+
+                        # Relationship loss
+                        rel_loss = F.mse_loss(relationship_score, expected_score.unsqueeze(0))
+                        relationship_losses.append(rel_loss)
+
+                        # Refine features based on relationship
+                        if relationship_score > 0.5:  # Strong relationship
+                            vocal_refined = self.feature_refiner[pair_idx](
+                                torch.cat([vocal_feat, encoded_spatial], dim=0)
+                            )
+                            arytenoid_refined = self.feature_refiner[pair_idx](
+                                torch.cat([arytenoid_feat, encoded_spatial], dim=0)
+                            )
+
+                            refined_features[b, v_idx] = vocal_refined
+                            refined_features[b, a_idx] = arytenoid_refined
+
+        avg_relationship_loss = torch.stack(relationship_losses).mean() if relationship_losses else torch.tensor(0.0,
+                                                                                                                 device=features.device)
+
+        return refined_features, avg_relationship_loss
+
+    def compute_expected_relationship(self, vocal_box, arytenoid_box, vocal_cls, arytenoid_cls):
+        """Compute expected relationship score based on anatomical knowledge"""
+        cx_v, cy_v, w_v, h_v = vocal_box
+        cx_a, cy_a, w_a, h_a = arytenoid_box
+
+        # Expected relationships based on anatomy
+        expected_score = 0.0
+
+        # Arytenoid should be below vocal fold
+        if cy_a > cy_v:
+            expected_score += 0.3
+
+        # Should be on the same side (left/right)
+        if vocal_cls == 0 and arytenoid_cls == 1:  # left vocal -> left arytenoid
+            if cx_a <= cx_v + w_v * 0.2:  # Allow some tolerance
+                expected_score += 0.3
+        elif vocal_cls == 2 and arytenoid_cls == 3:  # right vocal -> right arytenoid
+            if cx_a >= cx_v - w_v * 0.2:
+                expected_score += 0.3
+
+        # Size relationship (arytenoid typically smaller)
+        if w_a < w_v and h_a < h_v:
+            expected_score += 0.2
+
+        # Distance should be reasonable
+        distance = torch.sqrt((cx_a - cx_v) ** 2 + (cy_a - cy_v) ** 2)
+        if distance < (w_v + h_v) * 0.5:  # Within reasonable distance
+            expected_score += 0.2
+
+        return torch.tensor(expected_score, device=vocal_box.device)
+
 class MSDeformableAttention(nn.Module):
     def __init__(
         self, 
@@ -236,12 +442,19 @@ class TransformerDecoderLayer(nn.Module):
 
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1):
+    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1, vocal_arytenoid_pairs=None):
         super(TransformerDecoder, self).__init__()
         self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
+
+        if vocal_arytenoid_pairs:
+            self.spatial_relationship = SpatialRelationshipModule(
+                hidden_dim, len(vocal_arytenoid_pairs) * 2 + 2, vocal_arytenoid_pairs
+            )
+        else:
+            self.spatial_relationship = None
 
     def forward(self,
                 target,
@@ -310,7 +523,9 @@ class RTDETRTransformerv2(nn.Module):
                  eps=1e-2, 
                  aux_loss=True, 
                  cross_attn_method='default', 
-                 query_select_method='default'):
+                 query_select_method='default',
+                 vocal_arytenoid_pairs=None,
+                 relationship_loss_weight=0.1):
         super().__init__()
         assert len(feat_channels) <= num_levels
         assert len(feat_strides) == len(feat_channels)
@@ -328,11 +543,14 @@ class RTDETRTransformerv2(nn.Module):
         self.num_layers = num_layers
         self.eval_spatial_size = eval_spatial_size
         self.aux_loss = aux_loss
+        self.relationship_loss_weight = relationship_loss_weight
 
         assert query_select_method in ('default', 'one2many', 'agnostic'), ''
         assert cross_attn_method in ('default', 'discrete'), ''
         self.cross_attn_method = cross_attn_method
         self.query_select_method = query_select_method
+
+        self.vocal_arytenoid_pairs = vocal_arytenoid_pairs or []
 
         # backbone feature projection
         self._build_input_proj_layer(feat_channels)
@@ -340,7 +558,7 @@ class RTDETRTransformerv2(nn.Module):
         # Transformer module
         decoder_layer = TransformerDecoderLayer(hidden_dim, nhead, dim_feedforward, dropout, \
             activation, num_levels, num_points, cross_attn_method=cross_attn_method)
-        self.decoder = TransformerDecoder(hidden_dim, decoder_layer, num_layers, eval_idx)
+        self.decoder = TransformerDecoder(hidden_dim, decoder_layer, num_layers, eval_idx, vocal_arytenoid_pairs)
 
         # denoising
         self.num_denoising = num_denoising

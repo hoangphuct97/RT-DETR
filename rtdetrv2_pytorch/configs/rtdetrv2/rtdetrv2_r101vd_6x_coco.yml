@@ -22,6 +22,7 @@ HybridEncoder:
 
 RTDETRTransformerv2:
   feat_channels: [384, 384, 384]
+  vocal_arytenoid_pairs: [(1, 2), (5, 6)]
 
 
 optimizer:
