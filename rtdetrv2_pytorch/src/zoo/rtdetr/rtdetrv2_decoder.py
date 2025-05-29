@@ -449,6 +449,7 @@ class TransformerDecoder(nn.Module):
         self.num_layers = num_layers
         self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
 
+        # Add spatial relationship module
         if vocal_arytenoid_pairs:
             self.spatial_relationship = SpatialRelationshipModule(
                 hidden_dim, len(vocal_arytenoid_pairs) * 2 + 2, vocal_arytenoid_pairs
@@ -468,6 +469,7 @@ class TransformerDecoder(nn.Module):
                 memory_mask=None):
         dec_out_bboxes = []
         dec_out_logits = []
+        relationship_losses = []
         ref_points_detach = F.sigmoid(ref_points_unact)
 
         output = target
@@ -477,24 +479,43 @@ class TransformerDecoder(nn.Module):
 
             output = layer(output, ref_points_input, memory, memory_spatial_shapes, attn_mask, memory_mask, query_pos_embed)
 
-            inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points_detach))
+            # Get intermediate predictions
+            inter_bbox = bbox_head[i](output)
+            inter_logits = score_head[i](output)
+            inter_ref_bbox = F.sigmoid(inter_bbox + inverse_sigmoid(ref_points_detach))
+
+            # Apply spatial relationship learning
+            if self.spatial_relationship is not None and self.training:
+                refined_output, rel_loss = self.spatial_relationship(
+                    output, inter_ref_bbox, inter_logits
+                )
+                output = refined_output
+                relationship_losses.append(rel_loss)
+
+                # Recompute predictions with refined features
+                inter_bbox = bbox_head[i](output)
+                inter_logits = score_head[i](output)
+                inter_ref_bbox = F.sigmoid(inter_bbox + inverse_sigmoid(ref_points_detach))
 
             if self.training:
-                dec_out_logits.append(score_head[i](output))
+                dec_out_logits.append(inter_logits)
                 if i == 0:
                     dec_out_bboxes.append(inter_ref_bbox)
                 else:
                     dec_out_bboxes.append(F.sigmoid(bbox_head[i](output) + inverse_sigmoid(ref_points)))
 
             elif i == self.eval_idx:
-                dec_out_logits.append(score_head[i](output))
+                dec_out_logits.append(inter_logits)
                 dec_out_bboxes.append(inter_ref_bbox)
                 break
 
             ref_points = inter_ref_bbox
             ref_points_detach = inter_ref_bbox.detach()
 
-        return torch.stack(dec_out_bboxes), torch.stack(dec_out_logits)
+        # Return relationship losses for training
+        avg_rel_loss = torch.stack(relationship_losses).mean() if relationship_losses else torch.tensor(0.0, device=target.device)
+
+        return torch.stack(dec_out_bboxes), torch.stack(dec_out_logits), avg_rel_loss
 
 
 @register()
@@ -550,6 +571,7 @@ class RTDETRTransformerv2(nn.Module):
         self.cross_attn_method = cross_attn_method
         self.query_select_method = query_select_method
 
+        # Store anatomical relationships
         self.vocal_arytenoid_pairs = vocal_arytenoid_pairs or []
 
         # backbone feature projection
