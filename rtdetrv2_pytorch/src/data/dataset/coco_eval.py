@@ -40,16 +40,46 @@ class CocoEvaluator(object):
         if self.coco_eval is None:
             raise RuntimeError("Must call evaluate() before evaluate_per_category().")
 
-        results = self.coco_eval.get_per_class_ap(recall_threshold=0.5)
-        print(f"{'Category':<30} {'AP50':>8} {'Precision':>10} {'Recall':>8} {'F1':>6}")
+        precisions = self.coco_eval['bbox'].eval['precision']  # [TxRxKxAxM]
+        recalls = self.coco_eval['bbox'].eval['recall']        # [TxKxAxM]
+
+        cat_ids = self.coco_gt.getCatIds()
+        cat_info = self.coco_gt.loadCats(cat_ids)
+        cat_id_to_name = {cat['id']: cat['name'] for cat in cat_info}
+
+        print(f"\n{'Category':<30} {'AP50':>8} {'Precision':>10} {'Recall':>8} {'F1':>6}")
         print("-" * 70)
-        for item in results:
-            name = item['category']
-            ap = item['ap']
-            prec = item['precision']
-            rec = item['recall']
-            f1 = item['f1']
-            print(f"{name:<30} {ap:8.3f} {prec:10.3f} {rec:8.3f} {f1:6.3f}")
+
+        total_ap = []
+        total_prec = []
+        total_rec = []
+
+        for idx, cat_id in enumerate(cat_ids):
+            name = cat_id_to_name.get(cat_id, str(cat_id))
+            precision_vals = precisions[0, :, idx, 0, 0]  # IoU=0.5, area=all, maxDet=100
+            recall_val = recalls[0, idx, 0, 0]  # IoU=0.5, area=all, maxDet=100
+
+            valid = precision_vals[precision_vals > -1]
+            ap50 = np.mean(valid) if valid.size > 0 else 0.0
+            precision = np.max(valid) if valid.size > 0 else 0.0
+            recall = recall_val if recall_val != -1 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            total_ap.append(ap50)
+            total_prec.append(precision)
+            total_rec.append(recall)
+
+            print(f"{name:<30} {ap50:8.3f} {precision:10.3f} {recall:8.3f} {f1:6.3f}")
+
+        # Calculate average across all categories
+        avg_ap = np.mean(total_ap)
+        avg_prec = np.mean(total_prec)
+        avg_rec = np.mean(total_rec)
+        avg_f1 = 2 * avg_prec * avg_rec / (avg_prec + avg_rec) if (avg_prec + avg_rec) > 0 else 0.0
+
+        print("-" * 70)
+        print(f"{'All':<30} {avg_ap:8.3f} {avg_prec:10.3f} {avg_rec:8.3f} {avg_f1:6.3f}\n")
+
 
     def cleanup(self):
         self.coco_eval = {}
