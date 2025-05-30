@@ -36,6 +36,51 @@ class CocoEvaluator(object):
         self.img_ids = []
         self.eval_imgs = {k: [] for k in iou_types}
 
+    def evaluate_per_category(self):
+        if self.coco_eval is None:
+            raise RuntimeError("Must call evaluate() before evaluate_per_category().")
+
+        precisions = self.coco_eval['bbox'].eval['precision']  # [TxRxKxAxM]
+        recalls = self.coco_eval['bbox'].eval['recall']        # [TxKxAxM]
+
+        cat_ids = self.coco_gt.getCatIds()
+        cat_info = self.coco_gt.loadCats(cat_ids)
+        cat_id_to_name = {cat['id']: cat['name'] for cat in cat_info}
+
+        print(f"\n{'Category':<30} {'AP50':>8} {'Precision':>10} {'Recall':>8} {'F1':>6}")
+        print("-" * 70)
+
+        total_ap = []
+        total_prec = []
+        total_rec = []
+
+        for idx, cat_id in enumerate(cat_ids):
+            name = cat_id_to_name.get(cat_id, str(cat_id))
+            precision_vals = precisions[0, :, idx, 0, 0]  # IoU=0.5, area=all, maxDet=100
+            recall_val = recalls[0, idx, 0, 0]  # IoU=0.5, area=all, maxDet=100
+
+            valid = precision_vals[precision_vals > -1]
+            ap50 = np.mean(valid) if valid.size > 0 else 0.0
+            precision = np.max(valid) if valid.size > 0 else 0.0
+            recall = recall_val if recall_val != -1 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            total_ap.append(ap50)
+            total_prec.append(precision)
+            total_rec.append(recall)
+
+            print(f"{name:<30} {ap50:8.3f} {precision:10.3f} {recall:8.3f} {f1:6.3f}")
+
+        # Calculate average across all categories
+        avg_ap = np.mean(total_ap)
+        avg_prec = np.mean(total_prec)
+        avg_rec = np.mean(total_rec)
+        avg_f1 = 2 * avg_prec * avg_rec / (avg_prec + avg_rec) if (avg_prec + avg_rec) > 0 else 0.0
+
+        print("-" * 70)
+        print(f"{'All':<30} {avg_ap:8.3f} {avg_prec:10.3f} {avg_rec:8.3f} {avg_f1:6.3f}\n")
+
+
     def cleanup(self):
         self.coco_eval = {}
         for iou_type in self.iou_types:
@@ -78,47 +123,6 @@ class CocoEvaluator(object):
         for iou_type, coco_eval in self.coco_eval.items():
             print("IoU metric: {}".format(iou_type))
             coco_eval.summarize()
-
-            # Add per-category metrics
-            print("Per-category metrics for {}:".format(iou_type))
-            params = coco_eval.params
-            catIds = params.catIds
-            a = params.areaRngLbl.index('all')
-            m = params.maxDets.index(100)
-
-            print("\n++++++++++ Category AP and AR ++++++++++")
-            for k, catId in enumerate(catIds):
-                # Convert catId to Python int to avoid type issues
-                catId = int(catId)
-
-                # Try loadCats, fall back to direct cats access if it fails
-                cat_info = self.coco_gt.loadCats(catId)
-                if not cat_info:
-                    print(f"Warning: loadCats failed for category ID {catId}. Attempting direct access.")
-                    cat_info = self.coco_gt.cats.get(catId, {})
-                    cat_name = cat_info.get('name', f'Category_{catId}')
-                else:
-                    cat_name = cat_info[0].get('name', f'Category_{catId}')
-
-                # Compute AP for the category
-                precision = coco_eval.eval['precision'][:, :, k, a, m]
-                ap_per_iou = []
-                for t in range(len(params.iouThrs)):
-                    p = precision[t, :]
-                    p = p[p > -1]
-                    if p.size > 0:
-                        ap_per_iou.append(np.mean(p))
-                    else:
-                        ap_per_iou.append(0)
-                ap = np.mean(ap_per_iou)
-
-                # Compute AR for the category
-                recall = coco_eval.eval['recall'][:, k, a, m]
-                ar = np.mean(recall[recall > -1]) if np.any(recall > -1) else 0
-
-                print(f"Category: {cat_name}, AP: {ap:.4f}, AR: {ar:.4f}")
-
-            print("++++++++++++++++++++++++++++++++++++++++\n")
 
     def prepare(self, predictions, iou_type):
         if iou_type == "bbox":

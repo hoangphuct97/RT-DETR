@@ -142,6 +142,7 @@ def evaluate(model: torch.nn.Module, criterion: torch.nn.Module, postprocessor, 
     if coco_evaluator is not None:
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
+        coco_evaluator.evaluate_per_category()
 
     stats = {}
     # stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}

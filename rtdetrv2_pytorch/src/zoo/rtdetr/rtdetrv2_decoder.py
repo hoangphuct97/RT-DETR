@@ -293,19 +293,11 @@ class AnatomicalQueryEncoder(nn.Module):
             self,
             hidden_dim=256,
             num_classes=6,
-            vocal_fold_left_idx=0,
-            vocal_fold_right_idx=4,
-            arytenoid_left_idx=1,
-            arytenoid_right_idx=5,
             relation_dim=64  # dimension for encoding relationships
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_classes = num_classes
-        self.vocal_fold_left_idx = vocal_fold_left_idx
-        self.vocal_fold_right_idx = vocal_fold_right_idx
-        self.arytenoid_left_idx = arytenoid_left_idx
-        self.arytenoid_right_idx = arytenoid_right_idx
         self.relation_dim = relation_dim
 
         # Encode anatomical relationships
@@ -324,10 +316,8 @@ class AnatomicalQueryEncoder(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Class-specific projections
-        self.class_projections = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim) for _ in range(num_classes)
-        ])
+        # Single projection instead of class-specific ones
+        self.unified_projection = nn.Linear(hidden_dim, hidden_dim)
 
         # Pairwise relationship modeling
         self.pair_relation = nn.MultiheadAttention(
@@ -336,6 +326,9 @@ class AnatomicalQueryEncoder(nn.Module):
             dropout=0.1,
             batch_first=True
         )
+
+        # Spatial relationship weights (learnable)
+        self.spatial_weight = nn.Parameter(torch.ones(1))
 
         self._reset_parameters()
 
@@ -347,9 +340,8 @@ class AnatomicalQueryEncoder(nn.Module):
                     if layer.bias is not None:
                         nn.init.constant_(layer.bias, 0)
 
-        for proj in self.class_projections:
-            nn.init.xavier_uniform_(proj.weight)
-            nn.init.constant_(proj.bias, 0)
+        nn.init.xavier_uniform_(self.unified_projection.weight)
+        nn.init.constant_(self.unified_projection.bias, 0)
 
     def forward(self, query_content, query_boxes):
         """
@@ -360,103 +352,38 @@ class AnatomicalQueryEncoder(nn.Module):
         Returns:
             enhanced_query: [bs, num_queries, hidden_dim] - relationship-enhanced queries
         """
-        batch_size, num_queries = query_content.shape[:2]
-
-        # Compute potential class assignments based on current features
-        class_probs = torch.stack([
-            torch.softmax(proj(query_content).max(dim=-1)[0], dim=-1)
-            for proj in self.class_projections
-        ], dim=-1)  # [bs, num_queries, num_classes]
+        # Process all queries through unified projection
+        projected_content = self.unified_projection(query_content)
 
         # Encode spatial features with current box predictions
-        box_features = torch.cat([query_content, query_boxes], dim=-1)
+        box_features = torch.cat([projected_content, query_boxes], dim=-1)
         relation_features = self.relation_encoder(box_features)
 
         # Create enhanced queries with spatial relationship awareness
-        enhanced_queries = torch.cat([query_content, relation_features], dim=-1)
+        enhanced_queries = torch.cat([projected_content, relation_features], dim=-1)
         enhanced_queries = self.feature_enhancer(enhanced_queries)
-
-        # Generate attention masks to model pairwise relationships
-        # For each vocal fold query, attend more to potential arytenoid regions
-        attn_mask = torch.zeros(
-            batch_size, num_queries, num_queries,
-            device=query_content.device
-        )
-
-        # Calculate relative positions for attention weighting
-        for b in range(batch_size):
-            for i in range(num_queries):
-                # Check if this query might be a vocal fold
-                is_left_fold = class_probs[b, i, self.vocal_fold_left_idx] > 0.5
-                is_right_fold = class_probs[b, i, self.vocal_fold_right_idx] > 0.5
-
-                if is_left_fold or is_right_fold:
-                    # This is a potential vocal fold, find potential arytenoid locations
-                    box_i = query_boxes[b, i]  # (x, y, w, h)
-
-                    for j in range(num_queries):
-                        if i == j:
-                            continue
-
-                        box_j = query_boxes[b, j]
-
-                        # Check if box_j is below box_i (arytenoid region)
-                        is_below = box_j[1] > box_i[1]
-
-                        # Check if box_j is on the correct side (left/right)
-                        is_correct_side = True
-                        if is_left_fold:
-                            is_correct_side = box_j[0] <= box_i[0] + box_i[2] * 0.25
-                        elif is_right_fold:
-                            is_correct_side = box_j[0] >= box_i[0] - box_i[2] * 0.25
-
-                        # If potential arytenoid, increase attention weight
-                        if is_below and is_correct_side:
-                            attn_mask[b, i, j] = 1.0
-
-        # Apply pairwise relationship attention
-        # Convert attention weights to a proper attention mask for MultiheadAttention
-        attn_mask = attn_mask.view(batch_size * num_queries, num_queries)
-
-        # Reshape for batch processing
-        flat_queries = enhanced_queries.view(batch_size * num_queries, 1, self.hidden_dim)
-        repeated_queries = enhanced_queries.repeat(1, 1, num_queries).view(
-            batch_size * num_queries, num_queries, self.hidden_dim
-        )
 
         # Apply relationship-aware attention
         relation_enhanced, _ = self.pair_relation(
-            flat_queries,
-            repeated_queries,
-            repeated_queries,
-            attn_mask=attn_mask.bool()
+            enhanced_queries,
+            enhanced_queries,
+            enhanced_queries
         )
 
-        # Reshape back and combine with original enhanced queries
-        relation_enhanced = relation_enhanced.view(batch_size, num_queries, self.hidden_dim)
-        final_queries = enhanced_queries + relation_enhanced
+        # Apply learnable spatial weighting
+        final_queries = enhanced_queries + self.spatial_weight * relation_enhanced
 
         return final_queries
 
 
 class AnatomicalTransformerDecoderv2(TransformerDecoder):
-    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1,
-                 num_classes=6,
-                 vocal_fold_left_idx=0,
-                 vocal_fold_right_idx=4,
-                 arytenoid_left_idx=1,
-                 arytenoid_right_idx=5):
+    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1, num_classes=6):
         super().__init__(hidden_dim, decoder_layer, num_layers, eval_idx)
 
         # Add anatomical query encoder
         self.anatomical_encoder = AnatomicalQueryEncoder(
             hidden_dim=hidden_dim,
-            num_classes=num_classes,
-            vocal_fold_left_idx=vocal_fold_left_idx,
-            vocal_fold_right_idx=vocal_fold_right_idx,
-            arytenoid_left_idx=arytenoid_left_idx,
-            arytenoid_right_idx=arytenoid_right_idx
-        )
+            num_classes=num_classes)
 
         # Create a specialized layer for refining arytenoid predictions
         self.arytenoid_refinement = nn.ModuleList([
@@ -494,7 +421,6 @@ class AnatomicalTransformerDecoderv2(TransformerDecoder):
             # Apply anatomical relationship enhancement
             if i > 0:  # Skip first layer since predictions aren't reliable yet
                 anatomical_output = self.anatomical_encoder(
-                    query_pos_embed,
                     output,
                     ref_points_detach
                 )
@@ -602,12 +528,7 @@ class RTDETRTransformerv2(nn.Module):
             decoder_layer,
             num_layers,
             eval_idx,
-            num_classes=num_classes,
-            vocal_fold_left_idx=0,
-            vocal_fold_right_idx=4,
-            arytenoid_left_idx=1,
-            arytenoid_right_idx=5
-        )
+            num_classes=num_classes)
 
         # denoising
         self.num_denoising = num_denoising
