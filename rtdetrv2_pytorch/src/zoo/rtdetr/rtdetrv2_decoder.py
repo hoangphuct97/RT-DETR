@@ -351,10 +351,9 @@ class AnatomicalQueryEncoder(nn.Module):
             nn.init.xavier_uniform_(proj.weight)
             nn.init.constant_(proj.bias, 0)
 
-    def forward(self, query_embed, query_content, query_boxes):
+    def forward(self, query_content, query_boxes):
         """
         Args:
-            query_embed: [bs, num_queries, hidden_dim] - position encodings
             query_content: [bs, num_queries, hidden_dim] - content features
             query_boxes: [bs, num_queries, 4] - current box predictions (x,y,w,h)
             
