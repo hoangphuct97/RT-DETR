@@ -1,3 +1,5 @@
+from io import StringIO
+
 import streamlit as st
 import pandas as pd
 import os
@@ -92,6 +94,17 @@ def main():
 
     st.sidebar.metric("Progress", f"{rated_images}/{total_images}")
     st.sidebar.progress(progress)
+
+    ratings_df = load_existing_ratings()
+    csv = StringIO()
+    ratings_df.to_csv(csv, index=False)
+    csv.seek(0)
+    st.sidebar.download_button(
+        label="Download Result",
+        data=csv.getvalue(),
+        file_name="results.csv",
+        mime="text/csv",
+    )
 
     # Main content area
     col1, col2 = st.columns([2, 1])
