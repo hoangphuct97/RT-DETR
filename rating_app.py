@@ -209,7 +209,6 @@ def main():
     github_configured = 'github' in st.secrets
 
     if github_configured:
-        st.success("✅ GitHub integration enabled - ratings will be auto-synced!")
 
         # Show last sync status
         if 'last_github_sync' in st.session_state:
@@ -411,29 +410,6 @@ def main():
 
         else:
             st.info("Enter your name to start rating images.")
-
-    # Statistics section at the bottom
-    if not ratings_df.empty:
-        st.subheader("📊 Rating Statistics")
-
-        stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
-
-        with stat_col1:
-            st.metric("Total Ratings", len(ratings_df))
-
-        with stat_col2:
-            st.metric("Images Rated", ratings_df['image_name'].nunique())
-
-        with stat_col3:
-            st.metric("Average Rating", f"{ratings_df['rating'].mean():.2f}/5")
-
-        with stat_col4:
-            st.metric("Doctors Participating", ratings_df['doctor_name'].nunique())
-
-        # Rating distribution chart
-        if len(ratings_df) > 0:
-            rating_counts = ratings_df['rating'].value_counts().sort_index()
-            st.bar_chart(rating_counts)
 
 if __name__ == "__main__":
     main()
