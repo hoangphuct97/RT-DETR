@@ -494,7 +494,6 @@ class AnatomicalTransformerDecoderv2(TransformerDecoder):
             # Apply anatomical relationship enhancement
             if i > 0:  # Skip first layer since predictions aren't reliable yet
                 anatomical_output = self.anatomical_encoder(
-                    query_pos_embed,
                     output,
                     ref_points_detach
                 )
