@@ -416,7 +416,9 @@ class AnatomicalQueryEncoder(nn.Module):
 
         # Apply pairwise relationship attention
         # Convert attention weights to a proper attention mask for MultiheadAttention
-        attn_mask = attn_mask.view(batch_size * num_queries, num_queries)
+        # attn_mask = attn_mask.view(batch_size * num_queries, num_queries)
+        attn_mask = 1.0 - attn_mask
+        attn_mask_bool = attn_mask.bool()
 
         # Reshape for batch processing
         flat_queries = enhanced_queries.view(batch_size * num_queries, 1, self.hidden_dim)
@@ -429,7 +431,7 @@ class AnatomicalQueryEncoder(nn.Module):
             flat_queries,
             repeated_queries,
             repeated_queries,
-            attn_mask=attn_mask.bool()
+            attn_mask=attn_mask_bool
         )
 
         # Reshape back and combine with original enhanced queries
