@@ -378,64 +378,40 @@ class AnatomicalQueryEncoder(nn.Module):
 
         # Generate attention masks to model pairwise relationships
         # For each vocal fold query, attend more to potential arytenoid regions
-        attn_mask = torch.zeros(
-            batch_size, num_queries, num_queries,
-            device=query_content.device
-        )
+        key_padding_mask = torch.ones(batch_size, num_queries, device=query_content.device).bool()
 
         # Calculate relative positions for attention weighting
         for b in range(batch_size):
             for i in range(num_queries):
                 # Check if this query might be a vocal fold
-                is_left_fold = class_probs[b, i, self.vocal_fold_left_idx] > 0.5
-                is_right_fold = class_probs[b, i, self.vocal_fold_right_idx] > 0.5
+                is_vocal = (class_probs[b, i, self.vocal_fold_left_idx] > 0.5 or
+                            class_probs[b, i, self.vocal_fold_right_idx] > 0.5)
 
-                if is_left_fold or is_right_fold:
-                    # This is a potential vocal fold, find potential arytenoid locations
-                    box_i = query_boxes[b, i]  # (x, y, w, h)
-
-                    for j in range(num_queries):
-                        if i == j:
-                            continue
-
-                        box_j = query_boxes[b, j]
-
-                        # Check if box_j is below box_i (arytenoid region)
-                        is_below = box_j[1] > box_i[1]
-
-                        # Check if box_j is on the correct side (left/right)
-                        is_correct_side = True
-                        if is_left_fold:
-                            is_correct_side = box_j[0] <= box_i[0] + box_i[2] * 0.25
-                        elif is_right_fold:
-                            is_correct_side = box_j[0] >= box_i[0] - box_i[2] * 0.25
-
-                        # If potential arytenoid, increase attention weight
-                        if is_below and is_correct_side:
-                            attn_mask[b, i, j] = 1.0
+                if not is_vocal:
+                    continue
+                box_i = query_boxes[b, i]
+                for j in range(num_queries):
+                    if i == j:
+                        key_padding_mask[b, j] = False  # self-attention
+                        continue
+                    box_j = query_boxes[b, j]
+                    is_below = box_j[1] > box_i[1]
+                    side_ok = ((class_probs[b, i, self.vocal_fold_left_idx] > 0.5 and box_j[0] <= box_i[0] + box_i[2] * 0.25) or
+                               (class_probs[b, i, self.vocal_fold_right_idx] > 0.5 and box_j[0] >= box_i[0] - box_i[2] * 0.25))
+                    if is_below and side_ok:
+                        key_padding_mask[b, j] = False
 
         # Apply pairwise relationship attention
         # Convert attention weights to a proper attention mask for MultiheadAttention
-        # attn_mask = attn_mask.view(batch_size * num_queries, num_queries)
-        attn_mask = 1.0 - attn_mask
-        attn_mask_bool = attn_mask.bool()
-
-        # Reshape for batch processing
-        flat_queries = enhanced_queries.view(batch_size * num_queries, 1, self.hidden_dim)
-        repeated_queries = enhanced_queries.repeat(1, 1, num_queries).view(
-            batch_size * num_queries, num_queries, self.hidden_dim
-        )
-
         # Apply relationship-aware attention
         relation_enhanced, _ = self.pair_relation(
-            flat_queries,
-            repeated_queries,
-            repeated_queries,
-            attn_mask=attn_mask_bool
+            query=enhanced_queries,
+            key=enhanced_queries,
+            value=enhanced_queries,
+            key_padding_mask=key_padding_mask
         )
 
         # Reshape back and combine with original enhanced queries
-        relation_enhanced = relation_enhanced.view(batch_size, num_queries, self.hidden_dim)
         final_queries = enhanced_queries + relation_enhanced
 
         return final_queries
