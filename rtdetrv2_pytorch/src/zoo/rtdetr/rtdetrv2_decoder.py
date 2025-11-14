@@ -286,147 +286,184 @@ class TransformerDecoder(nn.Module):
 
 class AnatomicalQueryEncoder(nn.Module):
     """
-    Encodes anatomical relationships between vocal folds and arytenoid cartilages
-    directly into query embeddings to improve detection.
+    Vectorized version: No Python loops, fully differentiable, torch.compile-friendly.
     """
     def __init__(
             self,
-            hidden_dim=256,
-            num_classes=6,
-            vocal_fold_left_idx=0,
-            vocal_fold_right_idx=4,
-            arytenoid_left_idx=1,
-            arytenoid_right_idx=5,
-            relation_dim=64  # dimension for encoding relationships
+            hidden_dim: int = 256,
+            num_classes: int = 6,
+            vocal_fold_left_idx: int = 0,
+            vocal_fold_right_idx: int = 4,
+            arytenoid_left_idx: int = 1,
+            arytenoid_right_idx: int = 5,
+            relation_dim: int = 64,
+            topk_arytenoids: int = 1,
+            temperature: float = 1.0
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_classes = num_classes
-        self.vocal_fold_left_idx = vocal_fold_left_idx
-        self.vocal_fold_right_idx = vocal_fold_right_idx
-        self.arytenoid_left_idx = arytenoid_left_idx
-        self.arytenoid_right_idx = arytenoid_right_idx
+        self.vf_l, self.vf_r = vocal_fold_left_idx, vocal_fold_right_idx
+        self.ar_l, self.ar_r = arytenoid_left_idx, arytenoid_right_idx
         self.relation_dim = relation_dim
+        self.topk = topk_arytenoids
+        self.temp = temperature
 
-        # Encode anatomical relationships
-        self.relation_encoder = nn.Sequential(
-            nn.Linear(hidden_dim + 4, hidden_dim),  # 4 for bbox coordinates
+        # 1. Class scoring (shared head)
+        self.class_head = nn.Linear(hidden_dim, num_classes)
+
+        # 2. Spatial relation encoder
+        self.spatial_encoder = nn.Sequential(
+            nn.Linear(hidden_dim + 4, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, relation_dim)
         )
 
-        # Relationship-aware feature enhancement
-        self.feature_enhancer = nn.Sequential(
+        # 3. Feature fusion
+        self.fusion = nn.Sequential(
             nn.Linear(hidden_dim + relation_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Class-specific projections
-        self.class_projections = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim) for _ in range(num_classes)
-        ])
-
-        # Pairwise relationship modeling
-        self.pair_relation = nn.MultiheadAttention(
-            hidden_dim,
-            num_heads=4,
-            dropout=0.1,
-            batch_first=True
+        # 4. Pairwise relation projector
+        self.pair_projector = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim)
         )
 
         self._reset_parameters()
 
     def _reset_parameters(self):
-        for module in [self.relation_encoder, self.feature_enhancer]:
-            for layer in module:
+        for m in [self.spatial_encoder, self.fusion, self.pair_projector]:
+            for layer in m:
                 if isinstance(layer, nn.Linear):
                     nn.init.xavier_uniform_(layer.weight)
                     if layer.bias is not None:
-                        nn.init.constant_(layer.bias, 0)
+                        nn.init.zeros_(layer.bias)
+        nn.init.xavier_uniform_(self.class_head.weight)
+        nn.init.zeros_(self.class_head.bias)
 
-        for proj in self.class_projections:
-            nn.init.xavier_uniform_(proj.weight)
-            nn.init.constant_(proj.bias, 0)
+    def forward(
+            self,
+            query_pos: torch.Tensor,      # [bs, N, D]
+            query_content: torch.Tensor,  # [bs, N, D]
+            query_boxes: torch.Tensor     # [bs, N, 4] in (cx, cy, w, h)
+    ) -> torch.Tensor:
+        bs, N, D = query_content.shape
 
-    def forward(self, query_content, query_boxes):
-        """
-        Args:
-            query_content: [bs, num_queries, hidden_dim] - content features
-            query_boxes: [bs, num_queries, 4] - current box predictions (x,y,w,h)
-            
-        Returns:
-            enhanced_query: [bs, num_queries, hidden_dim] - relationship-enhanced queries
-        """
-        batch_size, num_queries = query_content.shape[:2]
+        # 1. Class probabilities (soft, differentiable)
+        class_logits = self.class_head(query_content) / self.temp  # [bs, N, C]
+        class_probs = F.softmax(class_logits, dim=-1)  # [bs, N, C]
 
-        # Compute potential class assignments based on current features
-        class_probs = torch.stack([
-            torch.softmax(proj(query_content).max(dim=-1)[0], dim=-1)
-            for proj in self.class_projections
-        ], dim=-1)  # [bs, num_queries, num_classes]
+        # 2. Spatial features
+        spatial_input = torch.cat([query_content, query_boxes], dim=-1)  # [bs, N, D+4]
+        spatial_feat = self.spatial_encoder(spatial_input)  # [bs, N, R]
 
-        # Encode spatial features with current box predictions
-        box_features = torch.cat([query_content, query_boxes], dim=-1)
-        relation_features = self.relation_encoder(box_features)
+        # 3. Base enhanced queries
+        enhanced = torch.cat([query_content, spatial_feat], dim=-1)
+        enhanced = self.fusion(enhanced)  # [bs, N, D]
 
-        # Create enhanced queries with spatial relationship awareness
-        enhanced_queries = torch.cat([query_content, relation_features], dim=-1)
-        enhanced_queries = self.feature_enhancer(enhanced_queries)
+        # 4. Anatomical pairwise enhancement (vectorized)
+        relation_enhanced = self._compute_pairwise_enhancement(
+            enhanced, query_boxes, class_probs
+        )  # [bs, N, D]
 
-        # Generate attention masks to model pairwise relationships
-        # For each vocal fold query, attend more to potential arytenoid regions
-        key_padding_mask = torch.ones(batch_size, num_queries, device=query_content.device).bool()
+        # 5. Final fusion
+        output = enhanced + relation_enhanced
+        return output
 
-        # Calculate relative positions for attention weighting
-        for b in range(batch_size):
-            for i in range(num_queries):
-                # Check if this query might be a vocal fold
-                is_vocal = (class_probs[b, i, self.vocal_fold_left_idx] > 0.5 or
-                            class_probs[b, i, self.vocal_fold_right_idx] > 0.5)
+    def _compute_pairwise_enhancement(
+            self,
+            enhanced: torch.Tensor,      # [bs, N, D]
+            boxes: torch.Tensor,         # [bs, N, 4]
+            class_probs: torch.Tensor    # [bs, N, C]
+    ) -> torch.Tensor:
+        bs, N, D = enhanced.shape
+        device = enhanced.device
 
-                if not is_vocal:
-                    continue
-                box_i = query_boxes[b, i]
-                for j in range(num_queries):
-                    if i == j:
-                        key_padding_mask[b, j] = False  # self-attention
-                        continue
-                    box_j = query_boxes[b, j]
-                    is_below = box_j[1] > box_i[1]
-                    side_ok = ((class_probs[b, i, self.vocal_fold_left_idx] > 0.5 and box_j[0] <= box_i[0] + box_i[2] * 0.25) or
-                               (class_probs[b, i, self.vocal_fold_right_idx] > 0.5 and box_j[0] >= box_i[0] - box_i[2] * 0.25))
-                    if is_below and side_ok:
-                        key_padding_mask[b, j] = False
+        # Extract centers and sizes
+        centers = boxes[:, :, :2]           # [bs, N, 2]
+        sizes = boxes[:, :, 2:]             # [bs, N, 2]
 
-        # Apply pairwise relationship attention
-        # Convert attention weights to a proper attention mask for MultiheadAttention
-        # Apply relationship-aware attention
-        relation_enhanced, _ = self.pair_relation(
-            query=enhanced_queries,
-            key=enhanced_queries,
-            value=enhanced_queries,
-            key_padding_mask=key_padding_mask
-        )
+        # Compute pairwise center differences: [bs, N, N, 2]
+        diff = centers.unsqueeze(2) - centers.unsqueeze(1)  # i - j
 
-        # Reshape back and combine with original enhanced queries
-        final_queries = enhanced_queries + relation_enhanced
+        # Relative position constraints
+        dy = diff[..., 1]  # [bs, N, N]
+        dx = diff[..., 0]
 
-        return final_queries
+        # Size-normalized thresholds
+        w_i = sizes[:, :, 0:1].unsqueeze(2)  # [bs, N, 1]
+        h_i = sizes[:, :, 1:2].unsqueeze(2)
+
+        # Anatomical constraints (arytenoid is below and near vocal fold)
+        is_below = dy > 0.3 * h_i
+        is_near_x = (dx.abs() < 0.5 * w_i)
+
+        # Side constraints
+        vf_left_mask = class_probs[:, :, self.vf_l] > 0.1  # [bs, N]
+        vf_right_mask = class_probs[:, :, self.vf_r] > 0.1
+        ar_left_mask = class_probs[:, :, self.ar_l] > 0.1
+        ar_right_mask = class_probs[:, :, self.ar_r] > 0.1
+
+        # Build masks: [bs, N, N]
+        vf_mask = (vf_left_mask | vf_right_mask).unsqueeze(2)  # [bs, N, 1]
+        ar_mask = (ar_left_mask | ar_right_mask).unsqueeze(1)  # [bs, 1, N]
+
+        # Final candidate mask
+        candidate_mask = is_below & is_near_x & vf_mask & ar_mask  # [bs, N, N]
+        candidate_mask = candidate_mask.float()
+
+        # Avoid self-pair
+        self_mask = torch.eye(N, device=device, dtype=torch.bool)
+        self_mask = self_mask.unsqueeze(0).expand(bs, -1, -1)
+        candidate_mask = candidate_mask.masked_fill(self_mask, 0)
+
+        # Top-k arytenoids per vocal fold
+        if self.topk > 0 and candidate_mask.sum() > 0:
+            scores = candidate_mask * class_probs[:, :, self.ar_l:self.ar_r+1].sum(-1).unsqueeze(1)
+            topk_scores, topk_idx = torch.topk(scores, k=self.topk, dim=2)  # [bs, N, K]
+            topk_mask = topk_scores > 0
+
+            # Gather arytenoid features
+            topk_idx = topk_idx.masked_fill(~topk_mask, 0)
+            ar_feat = enhanced.unsqueeze(1).expand(-1, N, -1, -1)  # [bs, N, N, D]
+            ar_feat = ar_feat.gather(2, topk_idx.unsqueeze(-1).expand(-1, -1, -1, D))  # [bs, N, K, D]
+            ar_feat = ar_feat.mean(dim=2)  # [bs, N, D]
+
+            # Combine with vocal fold
+            pair_input = torch.cat([enhanced, ar_feat], dim=-1)  # [bs, N, 2D]
+            pair_output = self.pair_projector(pair_input)  # [bs, N, D]
+
+            # Apply only where valid
+            valid_vf = (topk_mask.sum(-1) > 0).float().unsqueeze(-1)  # [bs, N, 1]
+            relation_enhanced = pair_output * valid_vf
+        else:
+            relation_enhanced = torch.zeros_like(enhanced)
+
+        return relation_enhanced
 
 
 class AnatomicalTransformerDecoderv2(TransformerDecoder):
-    def __init__(self, hidden_dim, decoder_layer, num_layers, eval_idx=-1,
-                 num_classes=6,
-                 vocal_fold_left_idx=0,
-                 vocal_fold_right_idx=4,
-                 arytenoid_left_idx=1,
-                 arytenoid_right_idx=5):
+    def __init__(
+            self,
+            hidden_dim: int,
+            decoder_layer: nn.Module,
+            num_layers: int,
+            eval_idx: int = -1,
+            num_classes: int = 6,
+            vocal_fold_left_idx: int = 0,
+            vocal_fold_right_idx: int = 4,
+            arytenoid_left_idx: int = 1,
+            arytenoid_right_idx: int = 5
+    ):
         super().__init__(hidden_dim, decoder_layer, num_layers, eval_idx)
 
-        # Add anatomical query encoder
         self.anatomical_encoder = AnatomicalQueryEncoder(
             hidden_dim=hidden_dim,
             num_classes=num_classes,
@@ -436,85 +473,80 @@ class AnatomicalTransformerDecoderv2(TransformerDecoder):
             arytenoid_right_idx=arytenoid_right_idx
         )
 
-        # Create a specialized layer for refining arytenoid predictions
-        self.arytenoid_refinement = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim) for _ in range(num_layers)
+        # Per-layer refinement for arytenoids
+        self.arytenoid_refiners = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            ) for _ in range(num_layers)
         ])
 
-        # Learnable parameters for anatomical prior
-        self.anatomical_prior = nn.Parameter(torch.zeros(1, 1, hidden_dim))
-        nn.init.normal_(self.anatomical_prior)
+        # Per-class anatomical prior (more expressive than single prior)
+        self.anatomical_priors = nn.Parameter(torch.randn(num_classes, hidden_dim))
+        nn.init.normal_(self.anatomical_priors, std=0.02)
 
-    def forward(self,
-                target,
-                ref_points_unact,
-                memory,
-                memory_spatial_shapes,
-                bbox_head,
-                score_head,
-                query_pos_head,
-                attn_mask=None,
-                memory_mask=None):
+    def forward(
+            self,
+            target: torch.Tensor,
+            ref_points_unact: torch.Tensor,
+            memory: torch.Tensor,
+            memory_spatial_shapes: list,
+            bbox_head: nn.ModuleList,
+            score_head: nn.ModuleList,
+            query_pos_head: nn.Module,
+            attn_mask: torch.Tensor = None,
+            memory_mask: torch.Tensor = None
+    ):
+        bs, N = target.shape[:2]
+        dec_bboxes, dec_logits = [], []
+        ref_points = F.sigmoid(ref_points_unact)
 
-        batch_size, num_queries = target.shape[:2]
-        dec_out_bboxes = []
-        dec_out_logits = []
-        ref_points_detach = F.sigmoid(ref_points_unact)
-
-        # Initial box predictions
         output = target
+        class_logits_prev = None
 
-        # Apply anatomical relationship modeling at each decoder layer
         for i, layer in enumerate(self.layers):
-            ref_points_input = ref_points_detach.unsqueeze(2)
-            query_pos_embed = query_pos_head(ref_points_detach)
+            ref_input = ref_points.unsqueeze(2)
+            pos_embed = query_pos_head(ref_points)
 
-            # Apply anatomical relationship enhancement
-            if i > 0:  # Skip first layer since predictions aren't reliable yet
-                anatomical_output = self.anatomical_encoder(
-                    output,
-                    ref_points_detach
-                )
+            # Apply anatomical enhancement from layer 1+
+            if i > 0:
+                output = self.anatomical_encoder(pos_embed, output, ref_points)
 
-                # Combine with original features
-                output = output + anatomical_output
+                # Add class-specific prior
+                if class_logits_prev is not None:
+                    class_probs = F.softmax(class_logits_prev, dim=-1)
+                    prior = torch.einsum('bnc,ch->bnh', class_probs, self.anatomical_priors)
+                    output = output + prior
 
-                # Add anatomical prior knowledge
-                output = output + self.anatomical_prior.expand(batch_size, num_queries, -1)
+            # Standard decoder layer
+            output = layer(output, ref_input, memory, memory_spatial_shapes,
+                           attn_mask, memory_mask, pos_embed)
 
-            # Process through normal transformer layer
-            output = layer(
-                output,
-                ref_points_input,
-                memory,
-                memory_spatial_shapes,
-                attn_mask,
-                memory_mask,
-                query_pos_embed
-            )
+            # Arytenoid-specific refinement
+            refined = output + self.arytenoid_refiners[i](output)
 
-            # Apply special refinement for arytenoid predictions
-            refined_output = output + self.arytenoid_refinement[i](output)
+            # Predict
+            bbox_pred = bbox_head[i](refined)
+            class_pred = score_head[i](refined)
+            class_logits_prev = class_pred.detach()
 
-            # Box prediction
-            inter_ref_bbox = F.sigmoid(bbox_head[i](refined_output) + inverse_sigmoid(ref_points_detach))
+            inter_bbox = F.sigmoid(bbox_pred + inverse_sigmoid(ref_points))
 
+            # Collect outputs
             if self.training:
-                dec_out_logits.append(score_head[i](refined_output))
-                if i == 0:
-                    dec_out_bboxes.append(inter_ref_bbox)
-                else:
-                    dec_out_bboxes.append(F.sigmoid(bbox_head[i](refined_output) + inverse_sigmoid(ref_points)))
-
+                dec_logits.append(class_pred)
+                dec_bboxes.append(inter_bbox if i == 0 else
+                                  F.sigmoid(bbox_head[i](refined) + inverse_sigmoid(ref_points)))
             elif i == self.eval_idx:
-                dec_out_logits.append(score_head[i](refined_output))
-                dec_out_bboxes.append(inter_ref_bbox)
+                dec_logits.append(class_pred)
+                dec_bboxes.append(inter_bbox)
                 break
 
-            ref_points = inter_ref_bbox
-            ref_points_detach = inter_ref_bbox.detach()
+            ref_points = inter_bbox
+            ref_points = ref_points.detach()
 
-        return torch.stack(dec_out_bboxes), torch.stack(dec_out_logits)
+        return torch.stack(dec_bboxes), torch.stack(dec_logits)
 
 
 @register()
