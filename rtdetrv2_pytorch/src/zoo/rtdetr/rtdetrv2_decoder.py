@@ -308,6 +308,8 @@ class AnatomicalQueryEncoder(nn.Module):
         self.arytenoid_right_idx = arytenoid_right_idx
         self.relation_dim = relation_dim
 
+        self.class_head = nn.Linear(hidden_dim, num_classes)
+
         # Encode anatomical relationships
         self.relation_encoder = nn.Sequential(
             nn.Linear(hidden_dim + 4, hidden_dim),  # 4 for bbox coordinates
@@ -324,11 +326,6 @@ class AnatomicalQueryEncoder(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Class-specific projections
-        self.class_projections = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim) for _ in range(num_classes)
-        ])
-
         # Pairwise relationship modeling
         self.relation_projection = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
@@ -336,9 +333,6 @@ class AnatomicalQueryEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
-
-        # Default projection layer to ensure all parameters are used
-        self.fallback_projection = nn.Linear(hidden_dim, hidden_dim)
 
         self._reset_parameters()
 
@@ -370,14 +364,8 @@ class AnatomicalQueryEncoder(nn.Module):
         batch_size, num_queries = query_content.shape[:2]
 
         # Compute potential class assignments based on current features
-        class_logits = [proj(query_content) for proj in self.class_projections]
-        class_max_values = [logit.max(dim=-1)[0] for logit in class_logits]
-        class_probs = torch.stack([
-            torch.softmax(max_val, dim=-1) for max_val in class_max_values
-        ], dim=-1)  # [bs, num_queries, num_classes]
-
-        # Ensure all parameters in class_projections are used
-        dummy_sum = sum(logit.sum() * 0.0 for logit in class_logits)
+        class_logits = self.class_head(query_content)  # [bs, N, C]
+        class_probs = F.softmax(class_logits, dim=-1)
 
         # Encode spatial features with current box predictions
         box_features = torch.cat([query_content, query_boxes], dim=-1)
@@ -386,13 +374,6 @@ class AnatomicalQueryEncoder(nn.Module):
         # Create enhanced queries with spatial relationship awareness
         enhanced_queries = torch.cat([query_content, relation_features], dim=-1)
         enhanced_queries = self.feature_enhancer(enhanced_queries)
-
-        # Ensure all parameters in relation_encoder are used
-        dummy_sum = dummy_sum + relation_features.sum() * 0.0
-
-        # Apply the fallback projection to ensure its parameters are used
-        fallback_features = self.fallback_projection(query_content)
-        dummy_sum = dummy_sum + fallback_features.sum() * 0.0
 
         # Direct modeling of anatomical relationships
         relation_enhanced = torch.zeros_like(enhanced_queries)
@@ -450,19 +431,9 @@ class AnatomicalQueryEncoder(nn.Module):
                         relation_enhanced[b, i] = self.relation_projection(combined_features)
                         has_enhancement[b, i] = 1.0
 
-        # Ensure there's always at least minimal use of the relation_projection
-        if has_enhancement.sum() == 0:
-            # Create dummy features to pass through relation_projection
-            dummy_features = torch.cat([
-                enhanced_queries[:1, :1].view(-1),
-                enhanced_queries[:1, :1].view(-1)
-            ], dim=0)
-            dummy_output = self.relation_projection(dummy_features) * 0.0
-            dummy_sum = dummy_sum + dummy_output.sum() * 0.0
-
         # Combine with original enhanced queries with a small epsilon from dummy_sum
         # to ensure all parameters are involved in the computation graph
-        final_queries = enhanced_queries + relation_enhanced * has_enhancement + dummy_sum
+        final_queries = enhanced_queries + relation_enhanced * has_enhancement
 
         return final_queries
 
