@@ -344,10 +344,6 @@ class AnatomicalQueryEncoder(nn.Module):
                     if layer.bias is not None:
                         nn.init.constant_(layer.bias, 0)
 
-        for proj in self.class_projections:
-            nn.init.xavier_uniform_(proj.weight)
-            nn.init.constant_(proj.bias, 0)
-
         nn.init.xavier_uniform_(self.fallback_projection.weight)
         nn.init.constant_(self.fallback_projection.bias, 0)
 
