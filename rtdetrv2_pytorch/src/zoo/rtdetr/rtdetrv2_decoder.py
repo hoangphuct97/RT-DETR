@@ -344,9 +344,6 @@ class AnatomicalQueryEncoder(nn.Module):
                     if layer.bias is not None:
                         nn.init.constant_(layer.bias, 0)
 
-        nn.init.xavier_uniform_(self.fallback_projection.weight)
-        nn.init.constant_(self.fallback_projection.bias, 0)
-
     def forward(self, query_embed, query_content, query_boxes):
         """
         Args:
