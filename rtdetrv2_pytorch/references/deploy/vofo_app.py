@@ -27,7 +27,7 @@ class Model(nn.Module):
 
 @st.cache_resource
 def load_model(config_path, checkpoint_path, device):
-    """Load and cache the RT-DETR model"""
+    """Load and cache the VoFo-DETR model"""
     cfg = YAMLConfig(config_path, resume=checkpoint_path)
 
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -113,21 +113,21 @@ def run_inference(model, image, device):
     return pred_labels[0], pred_boxes[0], pred_scores[0], inference_time
 
 def main():
-    st.title("🎯 RT-DETR Object Detection")
-    st.markdown("Upload an image to detect objects using RT-DETR model")
+    st.title("🎯 VoFo-DETR Object Detection")
+    st.markdown("Upload an image to detect objects using VoFo-DETR model")
 
     # Sidebar for configuration
     st.sidebar.header("Configuration")
 
     config_path = st.sidebar.text_input(
         "Config Path",
-        value="configs/rtdetr/rtdetr_r50vd_6x_coco.yml",
-        help="Path to your RT-DETR config file"
+        value="configs/rtdetrv2/rtdetrv2_r101vd_6x_coco.yml",
+        help="Path to your VoFo-DETR config file"
     )
 
     checkpoint_path = st.sidebar.text_input(
         "Checkpoint Path",
-        value="checkpoints/rtdetr_r50vd_6x_coco.pth",
+        value="checkpoint/best.pth",
         help="Path to your model checkpoint"
     )
 
@@ -145,16 +145,10 @@ def main():
         step=0.05
     )
 
-    # Optional: COCO class names
-    coco_classes = st.sidebar.checkbox("Use COCO class names", value=True)
-
-    if coco_classes:
-        class_names = [
-            'L_Vocal Fold', 'L_Arytenoid cartilage', 'Benign lesion', 
-            'Malignant lesion', 'R_Vocal Fold', 'R_Arytenoid cartilage'
-        ]
-    else:
-        class_names = None
+    class_names = [
+        'L_Vocal Fold', 'L_Arytenoid cartilage', 'Benign lesion',
+        'Malignant lesion', 'R_Vocal Fold', 'R_Arytenoid cartilage'
+    ]
 
     # Load model button
     if st.sidebar.button("Load Model"):
