@@ -137,7 +137,7 @@ def visualize_detection(image, gt_labels=None, gt_boxes=None, pred_labels=None, 
     return gt_image, pred_image
 
 
-def save_visualization(images, output_dir='results', filename_base='detection'):
+def save_visualization(image, output_dir='results', filename_base='detection'):
     """
     Save visualization images to disk
     
@@ -148,10 +148,7 @@ def save_visualization(images, output_dir='results', filename_base='detection'):
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    suffixes = ['ground_truth', 'prediction']
-    for i, img in enumerate(images):
-        if i < len(suffixes):
-            img.save(os.path.join(output_dir, f"{filename_base}_{suffixes[i]}.jpg"))
+    image.save(os.path.join(output_dir, f"{filename_base}_prediction.jpg"))
 
 
 def get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id=None):
@@ -308,7 +305,8 @@ def main(args):
     )
 
     # Save results
-    # save_visualization(result_images, args.output_dir, os.path.basename(args.im_file).split('.')[0])
+    if not args.bulk:
+        save_visualization(prediction, args.output_dir, os.path.basename(args.im_file).split('.')[0])
 
     return ground_truth, prediction
 
@@ -326,8 +324,8 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--bulk', type=bool, default=False, help='Print bulk prediction')
 
     # COCO dataset arguments
-    parser.add_argument('--coco-root', type=str, default=None, help='COCO dataset root directory')
-    parser.add_argument('--coco-ann', type=str, default=None, help='COCO annotation JSON file')
+    parser.add_argument('--coco-root', type=str, default='dataset', help='COCO dataset root directory')
+    parser.add_argument('--coco-ann', type=str, default='dataset/annotations_train.json', help='COCO annotation JSON file')
     parser.add_argument('--category-map', type=str, default=None,
                         help='JSON file mapping COCO category IDs to model category IDs')
 
@@ -343,6 +341,7 @@ if __name__ == '__main__':
             file_name = image['file_name']
             if file_name.startswith("./images"):
                 file_name = file_name.replace("./images/VoFo-SEG/", "")
+            print(f"++++++ {idx}, name: {file_name}")
             args.im_file = os.path.join(args.coco_root, file_name)
             ground_truth, prediction = main(args)
             ground_truths.append(ground_truth)
