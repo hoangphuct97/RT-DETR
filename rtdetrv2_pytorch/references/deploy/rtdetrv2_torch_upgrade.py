@@ -338,7 +338,7 @@ if __name__ == '__main__':
         predictions = []
         image_names = []
         for idx, (_, image) in enumerate(coco_dataset.coco.imgs.items()):
-            if idx >= 10:
+            if idx >= 100:
                 break
             file_name = image['file_name']
             if file_name.startswith("./images"):
