@@ -6,7 +6,7 @@ from reportlab.lib import colors
 from io import BytesIO
 
 
-def export_results(ground_truth_images, predicted_images, output_file="output/output.pdf"):
+def export_results(ground_truth_images, predicted_images, image_names, output_file="output/output.pdf"):
     """
     Create a PDF with image pairs (ground truth left, prediction right) in each row.
     
@@ -51,7 +51,7 @@ def export_results(ground_truth_images, predicted_images, output_file="output/ou
 
         # Add row with both images and their labels
         row = [
-            Paragraph(f"<b>Ground Truth {i + 1}</b>", styles['Normal']),
+            Paragraph(f"<b>Ground Truth {i + 1} ({image_names[i]})</b>", styles['Normal']),
             Paragraph(f"<b>Prediction {i + 1}</b>", styles['Normal'])
         ]
         table_data.append(row)

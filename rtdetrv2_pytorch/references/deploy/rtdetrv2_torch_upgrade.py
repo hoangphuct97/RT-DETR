@@ -1,5 +1,6 @@
 """Enhanced visualization for detection model with CocoDetection ground truth support
 """
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -324,7 +325,7 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--bulk', type=bool, default=False, help='Print bulk prediction')
 
     # COCO dataset arguments
-    parser.add_argument('--coco-root', type=str, default='dataset', help='COCO dataset root directory')
+    parser.add_argument('--coco-root', type=str, default='dataset/dataset/train/images', help='COCO dataset root directory')
     parser.add_argument('--coco-ann', type=str, default='dataset/annotations_train.json', help='COCO annotation JSON file')
     parser.add_argument('--category-map', type=str, default=None,
                         help='JSON file mapping COCO category IDs to model category IDs')
@@ -335,18 +336,23 @@ if __name__ == '__main__':
         coco_dataset = CustomCocoDetection(args.coco_root, args.coco_ann)
         ground_truths = []
         predictions = []
+        image_names = []
         for idx, (_, image) in enumerate(coco_dataset.coco.imgs.items()):
-            if idx >= 100:
+            if idx >= 10:
                 break
             file_name = image['file_name']
             if file_name.startswith("./images"):
                 file_name = file_name.replace("./images/VoFo-SEG/", "")
             print(f"++++++ {idx}, name: {file_name}")
+            image_names.append(file_name)
             args.im_file = os.path.join(args.coco_root, file_name)
             ground_truth, prediction = main(args)
             ground_truths.append(ground_truth)
             predictions.append(prediction)
 
-        export_results(ground_truths, predictions, "results/output.pdf")
+        now = datetime.now()
+        # Format the datetime object into the desired string format
+        formatted_datetime = now.strftime("%Y%m%d%_H%M")
+        export_results(ground_truths, predictions, image_names, f"results/output_{formatted_datetime}.pdf")
     else:
         main(args)
