@@ -1,5 +1,6 @@
 """Enhanced visualization for detection model with CocoDetection ground truth support
 """
+import time
 from datetime import datetime
 
 import torch
@@ -228,7 +229,7 @@ class CustomCocoDetection(CocoDetection):
             self.targets.append(self.coco.loadAnns(self.coco.getAnnIds(imgIds=img_id)))
 
 
-def main(args):
+def main(args, total_time):
     """main
     """
     cfg = YAMLConfig(args.config, resume=args.resume)
@@ -270,7 +271,10 @@ def main(args):
     im_data = transforms(im_pil)[None].to(args.device)
 
     # Run inference
+    start_time = time.time()
     output = model(im_data, orig_size)
+    inference_time = time.time() - start_time
+    total_time += inference_time
     pred_labels, pred_boxes, pred_scores = output
 
     # Load ground truth if provided
@@ -331,6 +335,7 @@ if __name__ == '__main__':
                         help='JSON file mapping COCO category IDs to model category IDs')
 
     args = parser.parse_args()
+    total_time = 0
 
     if args.bulk:
         coco_dataset = CustomCocoDetection(args.coco_root, args.coco_ann)
@@ -346,13 +351,14 @@ if __name__ == '__main__':
             print(f"++++++ {idx}, name: {file_name}")
             image_names.append(file_name)
             args.im_file = os.path.join(args.coco_root, file_name)
-            ground_truth, prediction = main(args)
+            ground_truth, prediction = main(args, total_time)
             ground_truths.append(ground_truth)
             predictions.append(prediction)
 
+        print(f"++++++ Total Inference Time: {total_time}")
         now = datetime.now()
         # Format the datetime object into the desired string format
         formatted_datetime = now.strftime("%Y%m%d%_H%M")
         export_results(ground_truths, predictions, image_names, f"results/output_{formatted_datetime}.pdf")
     else:
-        main(args)
+        main(args, total_time)
