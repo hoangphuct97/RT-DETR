@@ -18,23 +18,34 @@ from rtdetrv2_pytorch.src.core import YAMLConfig
 # from src.core import YAMLConfig
 
 # Define color palette for 6 categories - distinct colors with good visibility
+# CATEGORY_COLORS = {
+#     1: '#FF3838',  # Red
+#     2: '#18A558',  # Green
+#     3: '#4361EE',  # Blue
+#     4: '#FFB300',  # Amber
+#     5: '#9C27B0',  # Purple
+#     6: '#00BCD4',  # Cyan
+# }
+# 
+# # Map category indices to names (replace with your actual category names)
+# CATEGORY_NAMES = {
+#     1: 'L_Vocal Fold',
+#     2: 'L_Arytenoid cartilage',
+#     3: 'Benign lesion',
+#     4: 'Malignant lesion',
+#     5: 'R_Vocal Fold',
+#     6: 'R_Arytenoid cartilage',
+# }
+
 CATEGORY_COLORS = {
     1: '#FF3838',  # Red
-    2: '#18A558',  # Green
-    3: '#4361EE',  # Blue
-    4: '#FFB300',  # Amber
-    5: '#9C27B0',  # Purple
-    6: '#00BCD4',  # Cyan
+    2: '#FFB300',  # Amber
 }
 
 # Map category indices to names (replace with your actual category names)
 CATEGORY_NAMES = {
-    1: 'L_Vocal Fold',
-    2: 'L_Arytenoid cartilage',
-    3: 'Benign lesion',
-    4: 'Malignant lesion',
-    5: 'R_Vocal Fold',
-    6: 'R_Arytenoid cartilage',
+    1: 'tumor',
+    2: 'cyst',
 }
 
 
@@ -287,7 +298,7 @@ def main(args):
 
     # Load ground truth if provided
     gt_labels, gt_boxes = None, None
-    if args.coco_root and args.coco_ann:
+    if args.bulk and args.coco_root and args.coco_ann:
         # Load ground truth from COCO dataset
         coco_dataset = CustomCocoDetection(args.coco_root, args.coco_ann)
 
@@ -333,12 +344,12 @@ if __name__ == '__main__':
     parser.add_argument('-f', '--im-file', type=str, help='Input image file')
     parser.add_argument('-d', '--device', type=str, default='cpu', help='Device (cpu/cuda)')
     parser.add_argument('-t', '--threshold', type=float, default=0.7, help='Score threshold')
-    parser.add_argument('-o', '--output-dir', type=str, default='results', help='Output directory')
+    parser.add_argument('-o', '--output-dir', type=str, default='results/ct', help='Output directory')
     parser.add_argument('-b', '--bulk', type=bool, default=False, help='Print bulk prediction')
 
     # COCO dataset arguments
-    parser.add_argument('--coco-root', type=str, default='dataset/dataset/train/images', help='COCO dataset root directory')
-    parser.add_argument('--coco-ann', type=str, default='dataset/annotations_train.json', help='COCO annotation JSON file')
+    parser.add_argument('--coco-root', type=str, default='dataset/ct/test/images', help='COCO dataset root directory')
+    parser.add_argument('--coco-ann', type=str, default='dataset/ct/test/annotations_test.json', help='COCO annotation JSON file')
     parser.add_argument('--category-map', type=str, default=None,
                         help='JSON file mapping COCO category IDs to model category IDs')
 
@@ -351,26 +362,29 @@ if __name__ == '__main__':
         ground_truths = []
         predictions = []
         image_names = []
-        for idx, (_, image) in enumerate(coco_dataset.coco.imgs.items()):
-            if idx >= 100:
-                break
-            file_name = image['file_name']
-            if file_name.startswith("./images"):
-                file_name = file_name.replace("./images/VoFo-SEG/", "")
-            print(f"++++++ {idx}, name: {file_name}")
-            image_names.append(file_name)
-            args.im_file = os.path.join(args.coco_root, file_name)
-            ground_truth, prediction, inf_time = main(args)
-            ground_truths.append(ground_truth)
-            predictions.append(prediction)
-            total_time_accumulated += inf_time
-            count += 1
+        start_id = 3384
+        end_id = 3498
+        for _, (_, image) in enumerate(coco_dataset.coco.imgs.items()):
+            img_id = image['id']
+            
+            if start_id <= img_id <= end_id:
+                file_name = image['file_name']
+                if file_name.startswith("./images"):
+                    file_name = file_name.replace("./images/VoFo-SEG/", "")
+                print(f"++++++ {img_id}, name: {file_name}")
+                image_names.append(file_name)
+                args.im_file = os.path.join(args.coco_root, file_name)
+                ground_truth, prediction, inf_time = main(args)
+                ground_truths.append(ground_truth)
+                predictions.append(prediction)
+                total_time_accumulated += inf_time
+                count += 1
 
         print(f"++++++ Total Inference Time: {total_time_accumulated:.4f}s")
         print(f"++++++ Average Inference Time: {total_time_accumulated/max(1, count):.4f}s")
         now = datetime.now()
         # Format the datetime object into the desired string format
         formatted_datetime = now.strftime("%Y%m%d%_H%M")
-        export_results(ground_truths, predictions, image_names, f"results/output_{formatted_datetime}.pdf")
+        export_results(ground_truths, predictions, image_names, f"results/ct/output_{formatted_datetime}.pdf")
     else:
         main(args)

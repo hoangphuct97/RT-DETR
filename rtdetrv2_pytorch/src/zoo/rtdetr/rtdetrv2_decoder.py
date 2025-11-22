@@ -398,57 +398,57 @@ class AnatomicalQueryEncoder(nn.Module):
         relation_enhanced = torch.zeros_like(enhanced_queries)
         has_enhancement = torch.zeros(batch_size, num_queries, 1, device=query_content.device)
 
-        for b in range(batch_size):
-            # For each potential vocal fold query
-            for i in range(num_queries):
-                # Determine if this is likely to be a vocal fold
-                is_left_fold = class_probs[b, i, self.vocal_fold_left_idx] > 0.5
-                is_right_fold = class_probs[b, i, self.vocal_fold_right_idx] > 0.5
-
-                if is_left_fold or is_right_fold:
-                    box_i = query_boxes[b, i]  # (x, y, w, h)
-
-                    # Find potential arytenoid regions
-                    potential_arytenoids = []
-                    for j in range(num_queries):
-                        if i == j:
-                            continue
-
-                        box_j = query_boxes[b, j]
-
-                        # Check if box_j is below box_i (arytenoid is below vocal fold)
-                        is_below = box_j[1] > box_i[1]
-
-                        # Check if box_j is on the correct side (left/right)
-                        is_correct_side = True
-                        if is_left_fold:
-                            # For left vocal fold, arytenoid should be on the left side
-                            is_correct_side = box_j[0] <= box_i[0] + box_i[2] * 0.25
-                        elif is_right_fold:
-                            # For right vocal fold, arytenoid should be on the right side
-                            is_correct_side = box_j[0] >= box_i[0] - box_i[2] * 0.25
-
-                        # If potential arytenoid, add to list
-                        if is_below and is_correct_side:
-                            potential_arytenoids.append(j)
-
-                    # If we found potential arytenoids, enhance the vocal fold representation
-                    if potential_arytenoids:
-                        # Average the features of potential arytenoids
-                        arytenoid_features = torch.mean(
-                            enhanced_queries[b, potential_arytenoids],
-                            dim=0
-                        )
-
-                        # Combine vocal fold and arytenoid features
-                        combined_features = torch.cat([
-                            enhanced_queries[b, i],
-                            arytenoid_features
-                        ], dim=0)
-
-                        # Project to get relationship-enhanced features
-                        relation_enhanced[b, i] = self.relation_projection(combined_features)
-                        has_enhancement[b, i] = 1.0
+        # for b in range(batch_size):
+        #     # For each potential vocal fold query
+        #     for i in range(num_queries):
+        #         # Determine if this is likely to be a vocal fold
+        #         is_left_fold = class_probs[b, i, self.vocal_fold_left_idx] > 0.5
+        #         is_right_fold = class_probs[b, i, self.vocal_fold_right_idx] > 0.5
+        # 
+        #         if is_left_fold or is_right_fold:
+        #             box_i = query_boxes[b, i]  # (x, y, w, h)
+        # 
+        #             # Find potential arytenoid regions
+        #             potential_arytenoids = []
+        #             for j in range(num_queries):
+        #                 if i == j:
+        #                     continue
+        # 
+        #                 box_j = query_boxes[b, j]
+        # 
+        #                 # Check if box_j is below box_i (arytenoid is below vocal fold)
+        #                 is_below = box_j[1] > box_i[1]
+        # 
+        #                 # Check if box_j is on the correct side (left/right)
+        #                 is_correct_side = True
+        #                 if is_left_fold:
+        #                     # For left vocal fold, arytenoid should be on the left side
+        #                     is_correct_side = box_j[0] <= box_i[0] + box_i[2] * 0.25
+        #                 elif is_right_fold:
+        #                     # For right vocal fold, arytenoid should be on the right side
+        #                     is_correct_side = box_j[0] >= box_i[0] - box_i[2] * 0.25
+        # 
+        #                 # If potential arytenoid, add to list
+        #                 if is_below and is_correct_side:
+        #                     potential_arytenoids.append(j)
+        # 
+        #             # If we found potential arytenoids, enhance the vocal fold representation
+        #             if potential_arytenoids:
+        #                 # Average the features of potential arytenoids
+        #                 arytenoid_features = torch.mean(
+        #                     enhanced_queries[b, potential_arytenoids],
+        #                     dim=0
+        #                 )
+        # 
+        #                 # Combine vocal fold and arytenoid features
+        #                 combined_features = torch.cat([
+        #                     enhanced_queries[b, i],
+        #                     arytenoid_features
+        #                 ], dim=0)
+        # 
+        #                 # Project to get relationship-enhanced features
+        #                 relation_enhanced[b, i] = self.relation_projection(combined_features)
+        #                 has_enhancement[b, i] = 1.0
 
         # Ensure there's always at least minimal use of the relation_projection
         if has_enhancement.sum() == 0:
