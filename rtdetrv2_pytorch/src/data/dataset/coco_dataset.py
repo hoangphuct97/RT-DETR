@@ -188,13 +188,17 @@ class ConvertCocoPolysToMask(object):
         return image, target
 
 
+# mscoco_category2name = {
+#     1: 'L_Vocal Fold',
+#     2: 'L_Arytenoid cartilage',
+#     3: 'Benign lesion',
+#     4: 'Malignant lesion',
+#     5: 'R_Vocal Fold',
+#     6: 'R_Arytenoid cartilage',
+# }
 mscoco_category2name = {
-    1: 'L_Vocal Fold',
-    2: 'L_Arytenoid cartilage',
-    3: 'Benign lesion',
-    4: 'Malignant lesion',
-    5: 'R_Vocal Fold',
-    6: 'R_Arytenoid cartilage',
+    1: 'tumor',
+    2: 'cyst',
 }
 
 mscoco_category2label = {k: i for i, k in enumerate(mscoco_category2name.keys())}
