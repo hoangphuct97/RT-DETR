@@ -131,7 +131,7 @@ def visualize_detection(image, gt_labels=None, gt_boxes=None, pred_labels=None, 
     return gt_image, pred_image
 
 
-def save_visualization(image, output_dir='results', filename_base='detection'):
+def save_visualization(image, output_dir='results', filename_base='detection', is_gt=False):
     """
     Save visualization images to disk
     
@@ -141,8 +141,12 @@ def save_visualization(image, output_dir='results', filename_base='detection'):
         filename_base: base name for output files
     """
     os.makedirs(output_dir, exist_ok=True)
+    
+    suffix = "prediction"
+    if is_gt:
+        suffix = "gt"
 
-    image.save(os.path.join(output_dir, f"{filename_base}_prediction.jpg"))
+    image.save(os.path.join(output_dir, f"{filename_base}_{suffix}.jpg"))
 
 
 def get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id=None):
@@ -161,6 +165,7 @@ def get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id=None):
     # Find the image in the dataset
     target = None
     img_idx = None
+    img_info = None
 
     # If image_id is a string (filename), find it in the dataset
     if isinstance(image_id, str):
@@ -173,15 +178,17 @@ def get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id=None):
                 break
     else:
         # If image_id is an integer ID
-        for idx, (img_id, _) in enumerate(coco_dataset.imgs.items()):
+        for idx, (img_id, info) in enumerate(coco_dataset.coco.imgs.items()):
             if img_id == image_id:
                 img_idx = idx
+                img_info = info
                 break
 
     if img_idx is not None:
         target = coco_dataset.targets[img_idx]
     else:
-        raise ValueError(f"Image ID {image_id} not found in COCO dataset")
+        # raise ValueError(f"Image ID {image_id} not found in COCO dataset")
+        return None, None, img_info
 
     # Extract bounding boxes and labels
     boxes = []
@@ -203,9 +210,9 @@ def get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id=None):
         labels.append(cat_id)
 
     if not boxes:
-        return None, None
+        return None, None, img_info
 
-    return torch.tensor(labels), torch.tensor(boxes)
+    return torch.tensor(labels), torch.tensor(boxes), img_info
 
 
 class CustomCocoDetection(CocoDetection):
@@ -282,7 +289,7 @@ def main(args):
 
         # Get ground truth for the current image
         image_id = os.path.basename(args.im_file)
-        gt_labels, gt_boxes = get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id)
+        gt_labels, gt_boxes, _ = get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id)
 
         if gt_labels is not None:
             # Ensure proper device
@@ -306,6 +313,28 @@ def main(args):
 
     return ground_truth, prediction, inference_time
 
+def draw_gt():
+    coco_dataset = CustomCocoDetection(args.coco_root, args.coco_ann)
+
+    coco_to_model_id = None
+    if args.category_map:
+        with open(args.category_map, 'r') as f:
+            coco_to_model_id = json.load(f)
+
+    start_id = 20352
+    end_id = 20420
+    for image_id in range(start_id, end_id):
+        gt_labels, gt_boxes, img_info = get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id)
+        if gt_labels is None:
+            continue
+        image_path = os.path.join(args.coco_root, img_info['file_name'])
+        image = Image.open(image_path).convert('RGB')
+        
+        if gt_labels is not None:
+            gt_labels = gt_labels.to(args.device)
+            gt_boxes = gt_boxes.to(args.device)
+            gt_image = draw_boxes(image, gt_labels, gt_boxes, is_gt=True)
+            save_visualization(gt_image, 'results/ct/train/cyst', os.path.basename(img_info['file_name']).split('.')[0], True)
 
 if __name__ == '__main__':
     import argparse
@@ -318,18 +347,21 @@ if __name__ == '__main__':
     parser.add_argument('-t', '--threshold', type=float, default=0.7, help='Score threshold')
     parser.add_argument('-o', '--output-dir', type=str, default='results', help='Output directory')
     parser.add_argument('-b', '--bulk', type=bool, default=False, help='Print bulk prediction')
+    parser.add_argument('-gt', '--ground-truth', type=bool, default=False, help='Print bulk ground truth')
 
     # COCO dataset arguments
-    parser.add_argument('--coco-root', type=str, default='dataset/ct_baseline/test/images', help='COCO dataset root directory')
-    parser.add_argument('--coco-ann', type=str, default='dataset/ct_baseline/annotations_test.json', help='COCO annotation JSON file')
+    parser.add_argument('--coco-root', type=str, default='dataset/ct_baseline/train/images', help='COCO dataset root directory')
+    parser.add_argument('--coco-ann', type=str, default='dataset/ct_baseline/annotations_train.json', help='COCO annotation JSON file')
     parser.add_argument('--category-map', type=str, default=None,
                         help='JSON file mapping COCO category IDs to model category IDs')
 
     args = parser.parse_args()
     total_time_accumulated = 0
     count = 0
-
-    if args.bulk:
+    
+    if args.ground_truth:
+        draw_gt()
+    elif args.bulk:
         coco_dataset = CustomCocoDetection(args.coco_root, args.coco_ann)
         ground_truths = []
         predictions = []
