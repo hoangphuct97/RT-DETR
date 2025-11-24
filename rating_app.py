@@ -19,6 +19,10 @@ st.set_page_config(
 def upload_to_github(content, filename, commit_message="Update ratings"):
     """Upload file to GitHub repository"""
     try:
+        # Check if secrets are available
+        if 'github' not in st.secrets:
+            return None, None, None
+
         # GitHub configuration from secrets
         github_token = st.secrets["github"]["token"]
         repo_owner = st.secrets["github"]["username"]
@@ -95,6 +99,60 @@ def load_existing_ratings(csv_file="ratings.csv"):
         # Create empty DataFrame with required columns
         return pd.DataFrame(columns=['image_name', 'doctor_name', 'rating', 'timestamp'])
 
+def import_ratings_from_file(uploaded_file, target_doctor_name=None):
+    """Import ratings from uploaded CSV file, optionally filtering by doctor name"""
+    try:
+        # Read the uploaded file
+        df_import = pd.read_csv(uploaded_file)
+
+        # Validate required columns
+        required_columns = ['image_name', 'doctor_name', 'rating', 'timestamp']
+        if not all(col in df_import.columns for col in required_columns):
+            st.error(f"File phải có các cột: {', '.join(required_columns)}")
+            return None, 0
+
+        # Filter by doctor name if specified
+        if target_doctor_name:
+            df_import = df_import[df_import['doctor_name'] == target_doctor_name]
+
+            if df_import.empty:
+                st.warning(f"Không tìm thấy ratings nào của bác sĩ '{target_doctor_name}' trong file.")
+                return None, 0
+
+        return df_import, len(df_import)
+
+    except Exception as e:
+        st.error(f"Lỗi khi đọc file: {e}")
+        return None, 0
+
+def merge_ratings(existing_df, import_df, overwrite=True):
+    """Merge imported ratings with existing ratings"""
+    if import_df is None or import_df.empty:
+        return existing_df
+
+    if overwrite:
+        # Remove existing ratings for the same image-doctor combinations
+        for _, row in import_df.iterrows():
+            existing_df = existing_df[
+                ~((existing_df['image_name'] == row['image_name']) &
+                  (existing_df['doctor_name'] == row['doctor_name']))
+            ]
+
+        # Append imported ratings
+        result_df = pd.concat([existing_df, import_df], ignore_index=True)
+    else:
+        # Only add ratings that don't exist
+        for _, row in import_df.iterrows():
+            exists = ((existing_df['image_name'] == row['image_name']) &
+                      (existing_df['doctor_name'] == row['doctor_name'])).any()
+
+            if not exists:
+                existing_df = pd.concat([existing_df, pd.DataFrame([row])], ignore_index=True)
+
+        result_df = existing_df
+
+    return result_df
+
 def save_rating(image_name, doctor_name, rating, csv_file="ratings.csv"):
     """Save a single rating to the CSV file and sync to GitHub"""
     # Load existing ratings
@@ -121,8 +179,8 @@ def save_rating(image_name, doctor_name, rating, csv_file="ratings.csv"):
     df.to_csv(csv_file, index=False)
 
     # Auto-sync to GitHub if configured
-    if 'github' in st.secrets:
-        try:
+    try:
+        if 'github' in st.secrets:
             csv_content = df.to_csv(index=False)
             github_filename = f"ratings/image_ratings_{datetime.now().strftime('%Y%m%d')}.csv"
 
@@ -140,8 +198,8 @@ def save_rating(image_name, doctor_name, rating, csv_file="ratings.csv"):
                     'github_url': github_url,
                     'download_url': download_url
                 }
-        except Exception as e:
-            st.session_state.github_sync_error = str(e)
+    except Exception as e:
+        st.session_state.github_sync_error = str(e)
 
     return df
 
@@ -206,14 +264,17 @@ def main():
     st.markdown("### Rate images on a scale of 1-5")
 
     # Check GitHub configuration
-    github_configured = 'github' in st.secrets
+    try:
+        github_configured = 'github' in st.secrets
+    except Exception:
+        github_configured = False
 
     if github_configured:
 
         # Show last sync status
         if 'last_github_sync' in st.session_state:
             sync_info = st.session_state.last_github_sync
-            st.info(f"📤 Last sync: {sync_info['timestamp']} - File {sync_info['action']}")
+            st.info(f"🔄 Last sync: {sync_info['timestamp']} - File {sync_info['action']}")
             if sync_info.get('download_url'):
                 st.markdown(f"🔗 [Direct Download Link]({sync_info['download_url']})")
 
@@ -242,6 +303,77 @@ def main():
     # Sidebar for doctor selection
     st.sidebar.header("Doctor Information")
     selected_doctor = st.sidebar.text_input("Enter your name:")
+
+    # Import ratings section
+    st.sidebar.subheader("📥 Import Ratings")
+
+    with st.sidebar.expander("Import từ File CSV"):
+        uploaded_file = st.file_uploader(
+            "Chọn file CSV để import",
+            type=['csv'],
+            help="File phải có các cột: image_name, doctor_name, rating, timestamp"
+        )
+
+        if uploaded_file is not None:
+            # Option to filter by doctor name
+            filter_by_doctor = st.checkbox(
+                "Chỉ import ratings của bác sĩ hiện tại",
+                value=True,
+                help="Nếu chọn, chỉ import ratings của bác sĩ đang đăng nhập"
+            )
+
+            doctor_for_import = selected_doctor if filter_by_doctor else None
+
+            # Preview imported data
+            df_preview, count = import_ratings_from_file(uploaded_file, doctor_for_import)
+
+            if df_preview is not None and not df_preview.empty:
+                st.info(f"Tìm thấy {count} ratings để import")
+
+                # Show preview
+                with st.expander("Xem trước dữ liệu"):
+                    st.dataframe(df_preview.head(10))
+
+                # Overwrite option
+                overwrite_mode = st.radio(
+                    "Chế độ import:",
+                    ["Ghi đè ratings cũ", "Chỉ thêm ratings mới"],
+                    help="Ghi đè: thay thế ratings cũ. Thêm mới: giữ nguyên ratings đã có"
+                )
+
+                # Import button
+                if st.button("✅ Xác nhận Import", type="primary"):
+                    with st.spinner("Đang import..."):
+                        overwrite = (overwrite_mode == "Ghi đè ratings cũ")
+                        ratings_df = merge_ratings(ratings_df, df_preview, overwrite)
+
+                        # Save to CSV
+                        ratings_df.to_csv("ratings.csv", index=False)
+
+                        # Sync to GitHub if configured
+                        try:
+                            if 'github' in st.secrets and github_configured:
+                                csv_content = ratings_df.to_csv(index=False)
+                                github_filename = f"ratings/image_ratings_{datetime.now().strftime('%Y%m%d')}.csv"
+
+                                github_url, download_url, action = upload_to_github(
+                                    csv_content,
+                                    github_filename,
+                                    f"Import ratings - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                )
+
+                                if github_url:
+                                    st.success("✅ Import thành công và đã sync lên GitHub!")
+                                else:
+                                    st.success("✅ Import thành công! (GitHub sync failed)")
+                            else:
+                                st.success("✅ Import thành công!")
+                        except Exception as e:
+                            st.success("✅ Import thành công!")
+                            st.info(f"ℹ️ GitHub sync bỏ qua: {str(e)}")
+
+                        st.balloons()
+                        st.rerun()
 
     # Show progress for selected doctor
     total_images = len(image_files)
@@ -277,7 +409,7 @@ def main():
 
     # GitHub manual sync and links
     if github_configured and not ratings_df.empty:
-        st.sidebar.subheader("🐙 GitHub Backup")
+        st.sidebar.subheader("☁️ GitHub Backup")
 
         col1, col2 = st.sidebar.columns(2)
 
@@ -295,7 +427,7 @@ def main():
 
                     if github_url:
                         st.success("✅ CSV synced!")
-                        st.markdown(f"[📁 View on GitHub]({github_url})")
+                        st.markdown(f"[📝 View on GitHub]({github_url})")
                         st.markdown(f"[⬇️ Direct Download]({download_url})")
 
         with col2:
@@ -312,7 +444,7 @@ def main():
 
                     if github_url:
                         st.success("✅ Report uploaded!")
-                        st.markdown(f"[📁 View on GitHub]({github_url})")
+                        st.markdown(f"[📝 View on GitHub]({github_url})")
                         st.markdown(f"[⬇️ Direct Download]({download_url})")
 
         # Show persistent download links if available
@@ -395,7 +527,7 @@ def main():
                 # Show sync status if GitHub is configured
                 if github_configured and 'last_github_sync' in st.session_state:
                     sync_info = st.session_state.last_github_sync
-                    st.info(f"🐙 Auto-synced to GitHub at {sync_info['timestamp']}")
+                    st.info(f"☁️ Auto-synced to GitHub at {sync_info['timestamp']}")
                     if sync_info.get('download_url'):
                         st.markdown(f"[📥 Download Latest File]({sync_info['download_url']})")
 
