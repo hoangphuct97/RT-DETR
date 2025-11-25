@@ -66,8 +66,8 @@ RTDETRTransformerv2:
 
 
 RTDETRPostProcessor:
-  num_top_queries: 6
-  num_classes: 6
+  num_top_queries: 100
+  num_classes: 1
   remap_mscoco_category: True
 
 

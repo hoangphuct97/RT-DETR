@@ -72,7 +72,6 @@ class CocoDetection(torchvision.datasets.CocoDetection, DetDataset):
 
         if 'masks' in target:
             target['masks'] = convert_to_tv_tensor(target['masks'], key='masks')
-
         return image, target
 
     def extra_repr(self) -> str:
@@ -146,6 +145,8 @@ class ConvertCocoPolysToMask(object):
             labels = [obj["category_id"] for obj in anno]
 
         labels = torch.tensor(labels, dtype=torch.int64)
+        #print(">>>>>",category2label)
+
 
         if self.return_masks:
             segmentations = [obj["segmentation"] for obj in anno]
@@ -184,7 +185,6 @@ class ConvertCocoPolysToMask(object):
 
         target["orig_size"] = torch.as_tensor([int(w), int(h)])
         # target["size"] = torch.as_tensor([int(w), int(h)])
-
         return image, target
 
 
@@ -197,8 +197,7 @@ class ConvertCocoPolysToMask(object):
 #     6: 'R_Arytenoid cartilage',
 # }
 mscoco_category2name = {
-    1: 'tumor',
-    2: 'cyst',
+    1: 'lesion',
 }
 
 mscoco_category2label = {k: i for i, k in enumerate(mscoco_category2name.keys())}

@@ -28,7 +28,7 @@ optimizer:
 
 lr_scheduler:
   type: MultiStepLR
-  milestones: [1000]
+  milestones: [13212, 21139]
   gamma: 0.1
 
 

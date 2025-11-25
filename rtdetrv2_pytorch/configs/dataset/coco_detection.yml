@@ -10,7 +10,7 @@ evaluator:
 # num_classes: 91
 # remap_mscoco_category: False
 
-num_classes: 2
+num_classes: 1
 remap_mscoco_category: True
 
 
@@ -25,7 +25,7 @@ train_dataloader:
       type: Compose
       ops: ~
   shuffle: True
-  num_workers: 4
+  num_workers: 8
   drop_last: True 
   collate_fn:
     type: BatchImageCollateFuncion
@@ -42,7 +42,7 @@ val_dataloader:
       type: Compose
       ops: ~ 
   shuffle: False
-  num_workers: 4
+  num_workers: 8
   drop_last: False
   collate_fn:
     type: BatchImageCollateFuncion
