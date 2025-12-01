@@ -19,14 +19,12 @@ from rtdetrv2_pytorch.src.core import YAMLConfig
 
 # Define color palette for 6 categories - distinct colors with good visibility
 CATEGORY_COLORS = {
-    1: '#FF3838',  # Red
-    2: '#FFB300',  # Amber
+    1: '#FF3838'
 }
 
 # Map category indices to names (replace with your actual category names)
 CATEGORY_NAMES = {
-    1: 'tumor',
-    2: 'cyst',
+    1: 'lesion'
 }
 
 
@@ -131,7 +129,7 @@ def visualize_detection(image, gt_labels=None, gt_boxes=None, pred_labels=None, 
     return gt_image, pred_image
 
 
-def save_visualization(image, output_dir='results', filename_base='detection', is_gt=False):
+def save_visualization(image, output_dir='results/rt-detr', filename_base='detection', is_gt=False):
     """
     Save visualization images to disk
     
@@ -321,8 +319,8 @@ def draw_gt():
         with open(args.category_map, 'r') as f:
             coco_to_model_id = json.load(f)
 
-    start_id = 20352
-    end_id = 20420
+    start_id = 2580
+    end_id = 2581
     for image_id in range(start_id, end_id):
         gt_labels, gt_boxes, img_info = get_ground_truth_from_coco(image_id, coco_dataset, coco_to_model_id)
         if gt_labels is None:
@@ -334,7 +332,7 @@ def draw_gt():
             gt_labels = gt_labels.to(args.device)
             gt_boxes = gt_boxes.to(args.device)
             gt_image = draw_boxes(image, gt_labels, gt_boxes, is_gt=True)
-            save_visualization(gt_image, 'results/ct/train/cyst', os.path.basename(img_info['file_name']).split('.')[0], True)
+            save_visualization(gt_image, 'results/rt-detr', os.path.basename(img_info['file_name']).split('.')[0], True)
 
 if __name__ == '__main__':
     import argparse
@@ -350,8 +348,8 @@ if __name__ == '__main__':
     parser.add_argument('-gt', '--ground-truth', type=bool, default=False, help='Print bulk ground truth')
 
     # COCO dataset arguments
-    parser.add_argument('--coco-root', type=str, default='dataset/ct_baseline/train/images', help='COCO dataset root directory')
-    parser.add_argument('--coco-ann', type=str, default='dataset/ct_baseline/annotations_train.json', help='COCO annotation JSON file')
+    parser.add_argument('--coco-root', type=str, default='dataset/ct_baseline_2/test/images', help='COCO dataset root directory')
+    parser.add_argument('--coco-ann', type=str, default='dataset/ct_baseline_2/annotations_test.json', help='COCO annotation JSON file')
     parser.add_argument('--category-map', type=str, default=None,
                         help='JSON file mapping COCO category IDs to model category IDs')
 
